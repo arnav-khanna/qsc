@@ -1,0 +1,29 @@
+# Build outputs
+qsc3_c
+qsc3_c_dbg
+*.o
+*.a
+*.dSYM/
+
+# Generated archives and temporary outputs
+*.qsc
+out/
+tmp/
+*.tmp
+
+# Local/editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Large external benchmark corpora should be downloaded separately.
+benchmarks/datasets/enwik8
+benchmarks/datasets/enwik9
+benchmarks/datasets/silesia/

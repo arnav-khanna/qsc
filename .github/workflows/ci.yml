@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make
+
+      - name: Smoke roundtrip
+        run: |
+          mkdir -p /tmp/qsc-ci
+          ./qsc3_c compress benchmarks/datasets/canterbury/alice29.txt /tmp/qsc-ci/test.qsc
+          ./qsc3_c decompress /tmp/qsc-ci/test.qsc /tmp/qsc-ci/out
+          cmp benchmarks/datasets/canterbury/alice29.txt /tmp/qsc-ci/out/alice29.txt
+
+      - name: Built-in benchmark smoke test
+        run: ./qsc3_c benchmark benchmarks/datasets/canterbury/grammar.lsp
+
+      - name: Install smoke test
+        run: |
+          make install DESTDIR=/tmp/qsc-install PREFIX=/usr/local
+          /tmp/qsc-install/usr/local/bin/qsc benchmark benchmarks/datasets/canterbury/grammar.lsp
