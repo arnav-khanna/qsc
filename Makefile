@@ -1,5 +1,5 @@
 CC = cc
-CFLAGS = -O2 -Wall -Wextra -std=c11
+CFLAGS = -O2 -Wall -Wextra -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE
 SRCS = main.c qsc3.c range_coder.c context_model.c lz_engine.c
 TARGET = qsc3_c
 PREFIX ?= /usr/local
