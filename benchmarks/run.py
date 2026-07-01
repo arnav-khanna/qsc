@@ -162,7 +162,7 @@ def benchmark_file(path, algos):
 
     qsc = run_qsc3(path)
     rows.append(result_row(
-        path, "qsc3-v5", original_size, qsc["compressed_size"],
+        path, "qsc3-v6", original_size, qsc["compressed_size"],
         qsc["compression_time"], qsc["decompression_time"], qsc["verified"],
     ))
 
@@ -205,7 +205,7 @@ def print_summary(rows):
             f"({best['ratio']:.6f})"
         )
 
-    qsc_rows = [r for r in rows if r["algorithm"] == "qsc3-v5"]
+    qsc_rows = [r for r in rows if r["algorithm"] == "qsc3-v6"]
     total_original = sum(int(r["original_size"]) for r in qsc_rows)
     total_compressed = sum(int(r["compressed_size"]) for r in qsc_rows)
     if total_original:
@@ -226,7 +226,7 @@ def main():
 
     algos = build_algorithms()
     print(f"Benchmark files: {len(files)}")
-    print("Algorithms:", ", ".join(list(algos) + ["qsc3-v5"]))
+    print("Algorithms:", ", ".join(list(algos) + ["qsc3-v6"]))
 
     rows = []
     for path in files:

@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 #define QSC_MAGIC      "QSC3"
-#define QSC_VERSION    5         /* v5: optional text transforms + larger chunks/window */
+#define QSC_VERSION    6         /* v6: optional text, zero-run, and bit-plane transforms */
 #define QSC_CHUNK_SIZE 8388608   /* 8 MB */
 #define QSC_CARRY_OVER 524288   /* 512 KB */
 #define QSC_NUM_THREADS 0       /* 0 = auto-detect */

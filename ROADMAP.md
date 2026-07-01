@@ -13,7 +13,7 @@ Focus: code cleanup, test coverage, and documentation.
   - varint encoding and decoding;
   - LZ tokenization and reconstruction;
   - repeated-offset state transitions;
-  - text transform roundtrips;
+  - text, zero-run, and bit-plane transform roundtrips;
   - adaptive length coding roundtrips;
   - archive pack/unpack behavior.
 - Add regression tests over small text, binary, JSON, CSV, HTML, CSS, JavaScript, and already-compressed files.
@@ -23,7 +23,7 @@ Focus: code cleanup, test coverage, and documentation.
 - Add `LICENSE`.
 - Add reproducibility notes for benchmarks.
 - Keep generated archives, binaries, and large datasets out of the repository.
-- Add compatibility tests for v4 archives versus the new v5 transform-flagged chunk format.
+- Add compatibility tests for older archives versus the new v6 transform-flagged chunk format.
 
 ## Phase 2: Standalone Bitstream
 

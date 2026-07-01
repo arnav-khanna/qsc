@@ -71,12 +71,14 @@ static uint64_t read_be64(FILE *f) {
 }
 
 /* ======================================================================
- * Optional text transform
+ * Optional reversible transforms
  * ====================================================================== */
 
 #define QSC_TRANSFORM_RAW  0
 #define QSC_TRANSFORM_TEXT 1
 #define QSC_TRANSFORM_DYN_TEXT 2
+#define QSC_TRANSFORM_RLE  3
+#define QSC_TRANSFORM_BITPLANE 4
 #define QSC_TEXT_ESC      0
 
 static const char *QSC_TEXT_DICT[] = {
@@ -139,12 +141,21 @@ static uint8_t *text_transform_encode(const uint8_t *data, size_t len, size_t *o
     ByteBuffer_init(&out);
     ByteBuffer_reserve(&out, len);
 
+    int bucket_counts[256] = {0};
+    int buckets[256][QSC_TEXT_DICT_COUNT];
+    for (int d = 0; d < QSC_TEXT_DICT_COUNT; d++) {
+        uint8_t first = (uint8_t)QSC_TEXT_DICT[d][0];
+        buckets[first][bucket_counts[first]++] = d;
+    }
+
     size_t i = 0;
     while (i < len) {
         int best = -1;
         size_t best_len = 0;
+        uint8_t first = data[i];
 
-        for (int d = 0; d < QSC_TEXT_DICT_COUNT; d++) {
+        for (int bi = 0; bi < bucket_counts[first]; bi++) {
+            int d = buckets[first][bi];
             size_t dl = strlen(QSC_TEXT_DICT[d]);
             if (dl > best_len && i + dl <= len &&
                 memcmp(data + i, QSC_TEXT_DICT[d], dl) == 0) {
@@ -210,6 +221,119 @@ static uint8_t *text_transform_decode(const uint8_t *data, size_t len, size_t *o
     *out_len = out.len;
     ByteBuffer_free(&out);
     return result;
+}
+
+static uint8_t *rle_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
+    ByteBuffer out;
+    ByteBuffer_init(&out);
+    ByteBuffer_reserve(&out, len);
+
+    size_t i = 0;
+    while (i < len) {
+        if (data[i] != 0) {
+            ByteBuffer_push(&out, data[i++]);
+            continue;
+        }
+
+        size_t run = 1;
+        while (i + run < len && data[i + run] == 0 && run < 255) run++;
+        ByteBuffer_push(&out, 0);
+        ByteBuffer_push(&out, (uint8_t)run);
+        i += run;
+    }
+
+    uint8_t *result = (uint8_t *)malloc(out.len);
+    memcpy(result, out.data, out.len);
+    *out_len = out.len;
+    ByteBuffer_free(&out);
+    return result;
+}
+
+static uint8_t *rle_transform_decode(const uint8_t *data, size_t len, size_t *out_len) {
+    ByteBuffer out;
+    ByteBuffer_init(&out);
+    ByteBuffer_reserve(&out, len);
+
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] != 0) {
+            ByteBuffer_push(&out, data[i]);
+            continue;
+        }
+
+        if (i + 1 >= len) {
+            ByteBuffer_push(&out, 0);
+            break;
+        }
+
+        uint8_t count = data[++i];
+        for (uint8_t j = 0; j < count; j++) ByteBuffer_push(&out, 0);
+    }
+
+    uint8_t *result = (uint8_t *)malloc(out.len);
+    memcpy(result, out.data, out.len);
+    *out_len = out.len;
+    ByteBuffer_free(&out);
+    return result;
+}
+
+static int should_try_bitplane(const uint8_t *data, size_t len) {
+    if (len < 65536 || len > 262144 || looks_textual(data, len)) return 0;
+
+    size_t printable = 0;
+    size_t zeros = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') printable++;
+        if (c == 0) zeros++;
+    }
+
+    size_t printable_pct = printable * 100 / len;
+    size_t zero_pct = zeros * 100 / len;
+    return printable_pct >= 20 && printable_pct <= 45 &&
+           zero_pct >= 15 && zero_pct <= 40;
+}
+
+static uint8_t *bitplane_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
+    size_t stride = (len + 7) / 8;
+    size_t total = stride * 8;
+    uint8_t *out = (uint8_t *)calloc(total, 1);
+
+    for (int bit = 7; bit >= 0; bit--) {
+        size_t plane = (size_t)(7 - bit);
+        size_t base = plane * stride;
+        for (size_t i = 0; i < len; i++) {
+            if ((data[i] >> bit) & 1) {
+                out[base + (i >> 3)] |= (uint8_t)(1u << (7 - (i & 7)));
+            }
+        }
+    }
+
+    *out_len = total;
+    return out;
+}
+
+static uint8_t *bitplane_transform_decode(const uint8_t *data, size_t len,
+                                          size_t original_len, size_t *out_len) {
+    size_t stride = (original_len + 7) / 8;
+    size_t required = stride * 8;
+    if (len < required) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *out = (uint8_t *)calloc(original_len, 1);
+    for (size_t i = 0; i < original_len; i++) {
+        uint8_t value = 0;
+        for (int bit = 7; bit >= 0; bit--) {
+            size_t plane = (size_t)(7 - bit);
+            uint8_t packed = data[plane * stride + (i >> 3)];
+            value |= (uint8_t)(((packed >> (7 - (i & 7))) & 1) << bit);
+        }
+        out[i] = value;
+    }
+
+    *out_len = original_len;
+    return out;
 }
 
 typedef struct {
@@ -283,7 +407,7 @@ static int collect_dynamic_tokens(const uint8_t *data, size_t len,
         word_count_add(table, cap, data + start, wl);
     }
 
-    if (len <= 131072) {
+    if (len <= 32768) {
         for (size_t p = 0; p < len; p++) {
             if (p > 0 && is_word_byte(data[p - 1]) && is_word_byte(data[p])) continue;
 
@@ -346,12 +470,24 @@ static uint8_t *dynamic_transform_encode(const uint8_t *data, size_t len,
     ByteBuffer_init(&out);
     ByteBuffer_reserve(&out, len);
 
+    int *bucket_data = NULL;
+    int bucket_counts[256] = {0};
+    if (token_count > 0) {
+        bucket_data = (int *)malloc(256 * (size_t)token_count * sizeof(int));
+        for (int d = 0; d < token_count; d++) {
+            uint8_t first = (uint8_t)tokens[d].text[0];
+            bucket_data[(size_t)first * token_count + bucket_counts[first]++] = d;
+        }
+    }
+
     size_t i = 0;
     while (i < len) {
         int best = -1;
         size_t best_len = 0;
+        uint8_t first = data[i];
 
-        for (int d = 0; d < token_count; d++) {
+        for (int bi = 0; bi < bucket_counts[first]; bi++) {
+            int d = bucket_data[(size_t)first * token_count + bi];
             size_t dl = tokens[d].len;
             if (dl > best_len && i + dl <= len &&
                 memcmp(data + i, tokens[d].text, dl) == 0) {
@@ -380,6 +516,7 @@ static uint8_t *dynamic_transform_encode(const uint8_t *data, size_t len,
     memcpy(result, out.data, out.len);
     *out_len = out.len;
     ByteBuffer_free(&out);
+    free(bucket_data);
     return result;
 }
 
@@ -535,6 +672,55 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
     uint8_t *chosen_header = NULL;
     size_t chosen_header_len = 0;
     size_t chosen_total = 1 + raw_len;
+
+    size_t rle_len;
+    uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
+    if (rle_len < chunk_len) {
+        size_t rle_comp_len;
+        uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
+
+        if (1 + rle_comp_len < chosen_total) {
+            free(chosen);
+            free(chosen_header);
+            chosen = rle_comp;
+            chosen_len = rle_comp_len;
+            chosen_header = NULL;
+            chosen_header_len = 0;
+            chosen_total = 1 + rle_comp_len;
+            chosen_flag = QSC_TRANSFORM_RLE;
+        } else {
+            free(rle_comp);
+        }
+    }
+    free(rle);
+
+    if (should_try_bitplane(chunk, chunk_len)) {
+        size_t bp_len;
+        uint8_t *bp = bitplane_transform_encode(chunk, chunk_len, &bp_len);
+        size_t bp_comp_len;
+        uint8_t *bp_comp = qsc_compress_payload(bp, bp_len, NULL, 0, &bp_comp_len);
+        size_t total = 1 + 4 + bp_comp_len;
+
+        if (total < chosen_total) {
+            uint8_t *header = (uint8_t *)malloc(4);
+            header[0] = (uint8_t)(chunk_len >> 24);
+            header[1] = (uint8_t)(chunk_len >> 16);
+            header[2] = (uint8_t)(chunk_len >> 8);
+            header[3] = (uint8_t)chunk_len;
+
+            free(chosen);
+            free(chosen_header);
+            chosen = bp_comp;
+            chosen_len = bp_comp_len;
+            chosen_header = header;
+            chosen_header_len = 4;
+            chosen_total = total;
+            chosen_flag = QSC_TRANSFORM_BITPLANE;
+        } else {
+            free(bp_comp);
+        }
+        free(bp);
+    }
 
     if (looks_textual(chunk, chunk_len)) {
         size_t tx_len;
@@ -724,6 +910,31 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         uint8_t *tx = qsc_decompress_payload(payload, payload_len, NULL, 0, &tx_len);
         uint8_t *decoded = text_transform_decode(tx, tx_len, out_len);
         free(tx);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_RLE) {
+        size_t rle_len;
+        uint8_t *rle = qsc_decompress_payload(payload, payload_len, NULL, 0, &rle_len);
+        uint8_t *decoded = rle_transform_decode(rle, rle_len, out_len);
+        free(rle);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_BITPLANE) {
+        if (payload_len < 4) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        size_t bp_len;
+        uint8_t *bp = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &bp_len);
+        uint8_t *decoded = bitplane_transform_decode(bp, bp_len, original_len, out_len);
+        free(bp);
         return decoded;
     }
 
