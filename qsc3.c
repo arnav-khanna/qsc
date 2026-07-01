@@ -1389,6 +1389,7 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
                             size_t *out_len)
 {
     int try_spreadsheet_reorder = should_try_spreadsheet_reorder(chunk, chunk_len);
+    int is_textual = looks_textual(chunk, chunk_len);
 
     if (try_spreadsheet_reorder) {
         size_t shuf_len;
@@ -1405,6 +1406,33 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
             return result;
         }
         free(shuf_comp);
+    }
+
+    if (is_textual && chunk_len >= 80000 && chunk_len <= 1048576) {
+        uint32_t primary_index = 0;
+        size_t bwt_len;
+        uint8_t *bwt2 = bwt_mtf2_transform_encode(chunk, chunk_len, &primary_index, &bwt_len);
+        if (bwt2) {
+            size_t bwt2_direct_len;
+            uint8_t *bwt2_direct = qsc_compress_literal_payload(bwt2, bwt_len, &bwt2_direct_len);
+            size_t total = 1 + 8 + bwt2_direct_len;
+
+            if (total * 100 <= chunk_len * 36) {
+                uint8_t header[8];
+                write_len_header(header, chunk_len);
+                header[4] = (uint8_t)(primary_index >> 24);
+                header[5] = (uint8_t)(primary_index >> 16);
+                header[6] = (uint8_t)(primary_index >> 8);
+                header[7] = (uint8_t)primary_index;
+                uint8_t *result = wrap_chunk_payload(QSC_TRANSFORM_BWT_MTF2_DIRECT, header, 8,
+                                                     bwt2_direct, bwt2_direct_len, out_len);
+                free(bwt2);
+                return result;
+            }
+
+            free(bwt2_direct);
+            free(bwt2);
+        }
     }
 
     size_t raw_len;
@@ -1550,7 +1578,7 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
         free(shuf);
     }
 
-    if (looks_textual(chunk, chunk_len)) {
+    if (is_textual) {
         size_t tx_len;
         uint8_t *tx = text_transform_encode(chunk, chunk_len, &tx_len);
 

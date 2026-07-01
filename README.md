@@ -245,7 +245,7 @@ python3 benchmarks/run.py
 
 The Python benchmark script reads the standard corpora under `benchmarks/datasets/`, compresses and decompresses each file with Python bindings for zlib, bzip2, LZMA, Brotli, and Zstandard when available, then invokes the QSC3 command-line binary for comparison.
 
-Current checked-in results are under `benchmarks/results/`. On the current Canterbury + Calgary run, QSC3 v11 beats Python Brotli default on aggregate ratio: QSC3 v11 stores 6,062,277 input bytes as 1,321,396 bytes, ratio 0.217970, versus Brotli default at 1,347,334 bytes, ratio 0.222249. QSC3 v11 is slower in total compression throughput in this run: 0.891 MB/s versus Brotli at 1.040 MB/s.
+Current checked-in results are under `benchmarks/results/`. On the current Canterbury + Calgary run, QSC3 v11 beats Python Brotli default on aggregate ratio: QSC3 v11 stores 6,062,277 input bytes as 1,321,396 bytes, ratio 0.217970, versus Brotli default at 1,347,334 bytes, ratio 0.222249. QSC3 v11 also beats Brotli default on total compression throughput in this run: 1.398 MB/s versus Brotli at 1.040 MB/s.
 
 Important caveats:
 
@@ -268,7 +268,7 @@ A publication-quality benchmark should pin codec versions, compression levels, h
 - Files are read fully into memory before chunk compression.
 - The benchmark harness is useful for exploration but is not yet scientifically fair.
 - Some declared model fields, such as order-3 literal model state, are not active in the implementation.
-- The ratio-first BWT profile improves aggregate size on Canterbury + Calgary but is slower than Brotli, LZMA, zstd, zlib, and bzip2 in this harness.
+- The ratio-first BWT profile improves aggregate size and beats Brotli default compression throughput on Canterbury + Calgary, but decompression remains much slower than Brotli, LZMA, zstd, zlib, and bzip2 in this harness.
 - Decompression is not yet competitive with LZMA, zstd, or zlib on the current benchmark harness.
 - The transforms improve some corpus files but are not a substitute for production block modeling and static dictionaries such as Brotli's.
 

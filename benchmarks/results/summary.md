@@ -14,12 +14,12 @@ Generated with `python3 benchmarks/run.py`.
 
 | Algorithm | Files | Original bytes | Compressed bytes | Ratio | Total-time compress MB/s | Total-time decompress MB/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| qsc3-v11 | 29 | 6,062,277 | 1,321,396 | 0.217970 | 0.891 | 13.276 |
-| brotli-default | 29 | 6,062,277 | 1,347,334 | 0.222249 | 1.040 | 506.363 |
-| lzma | 29 | 6,062,277 | 1,377,992 | 0.227306 | 6.712 | 118.571 |
-| bzip2 | 29 | 6,062,277 | 1,409,211 | 0.232456 | 28.476 | 78.704 |
-| zstd-10 | 29 | 6,062,277 | 1,573,971 | 0.259634 | 71.492 | 1257.830 |
-| zlib-9 | 29 | 6,062,277 | 1,787,481 | 0.294853 | 12.147 | 1038.304 |
+| qsc3-v11 | 29 | 6,062,277 | 1,321,396 | 0.217970 | 1.398 | 12.838 |
+| brotli-default | 29 | 6,062,277 | 1,347,334 | 0.222249 | 1.040 | 488.831 |
+| lzma | 29 | 6,062,277 | 1,377,992 | 0.227306 | 6.572 | 119.184 |
+| bzip2 | 29 | 6,062,277 | 1,409,211 | 0.232456 | 28.093 | 75.767 |
+| zstd-10 | 29 | 6,062,277 | 1,573,971 | 0.259634 | 69.924 | 1274.602 |
+| zlib-9 | 29 | 6,062,277 | 1,787,481 | 0.294853 | 12.018 | 1014.201 |
 
 ## Best Ratio By File
 
@@ -59,43 +59,44 @@ Generated with `python3 benchmarks/run.py`.
 
 | File | Original bytes | Compressed bytes | Ratio | Compress MB/s | Decompress MB/s | Verified |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| calgary/bib | 111,261 | 28,136 | 0.252883 | 0.161 | 8.748 | True |
-| calgary/book1 | 768,771 | 232,926 | 0.302985 | 0.724 | 9.753 | True |
-| calgary/book2 | 610,856 | 158,619 | 0.259667 | 1.162 | 10.996 | True |
-| calgary/geo | 102,400 | 51,645 | 0.504346 | 2.562 | 7.379 | True |
-| calgary/news | 377,109 | 120,423 | 0.319332 | 1.712 | 9.433 | True |
-| calgary/obj1 | 21,504 | 10,012 | 0.465588 | 2.509 | 4.561 | True |
-| calgary/obj2 | 246,814 | 74,785 | 0.303001 | 7.448 | 15.734 | True |
-| calgary/paper1 | 53,161 | 18,196 | 0.342281 | 2.558 | 8.567 | True |
-| calgary/paper2 | 82,199 | 25,738 | 0.313118 | 1.889 | 7.154 | True |
-| calgary/paper3 | 46,526 | 17,854 | 0.383742 | 2.344 | 7.791 | True |
-| calgary/paper4 | 13,286 | 5,572 | 0.419389 | 1.176 | 3.055 | True |
-| calgary/paper5 | 11,954 | 5,053 | 0.422704 | 1.106 | 3.039 | True |
-| calgary/paper6 | 38,105 | 13,163 | 0.345440 | 2.459 | 7.154 | True |
-| calgary/pic | 513,216 | 49,123 | 0.095716 | 0.397 | 42.449 | True |
-| calgary/progc | 39,611 | 13,191 | 0.333014 | 2.442 | 7.421 | True |
-| calgary/progl | 71,646 | 15,975 | 0.222971 | 2.066 | 12.119 | True |
-| calgary/progp | 49,379 | 11,009 | 0.222949 | 2.629 | 9.942 | True |
-| calgary/trans | 93,695 | 18,005 | 0.192166 | 5.479 | 15.603 | True |
-| canterbury/alice29.txt | 152,089 | 43,945 | 0.288943 | 1.679 | 8.825 | True |
-| canterbury/asyoulik.txt | 125,179 | 40,460 | 0.323217 | 1.807 | 7.822 | True |
-| canterbury/cp.html | 24,603 | 7,916 | 0.321749 | 1.612 | 5.730 | True |
-| canterbury/fields.c | 11,150 | 3,131 | 0.280807 | 1.209 | 3.053 | True |
-| canterbury/grammar.lsp | 3,721 | 1,309 | 0.351787 | 0.641 | 1.080 | True |
-| canterbury/kennedy.xls | 1,029,744 | 36,918 | 0.035852 | 2.497 | 117.888 | True |
-| canterbury/lcet10.txt | 426,754 | 108,642 | 0.254578 | 1.394 | 10.761 | True |
-| canterbury/plrabn12.txt | 481,861 | 146,645 | 0.304331 | 0.962 | 9.673 | True |
-| canterbury/ptt5 | 513,216 | 49,124 | 0.095718 | 0.396 | 41.868 | True |
-| canterbury/sum | 38,240 | 12,050 | 0.315115 | 2.951 | 6.979 | True |
-| canterbury/xargs.1 | 4,227 | 1,831 | 0.433168 | 0.666 | 1.352 | True |
+| calgary/bib | 111,261 | 28,136 | 0.252883 | 0.183 | 6.438 | True |
+| calgary/book1 | 768,771 | 232,926 | 0.302985 | 7.156 | 9.621 | True |
+| calgary/book2 | 610,856 | 158,619 | 0.259667 | 7.515 | 10.844 | True |
+| calgary/geo | 102,400 | 51,645 | 0.504346 | 2.557 | 7.217 | True |
+| calgary/news | 377,109 | 120,423 | 0.319332 | 6.238 | 9.404 | True |
+| calgary/obj1 | 21,504 | 10,012 | 0.465588 | 2.436 | 4.047 | True |
+| calgary/obj2 | 246,814 | 74,785 | 0.303001 | 7.445 | 15.341 | True |
+| calgary/paper1 | 53,161 | 18,196 | 0.342281 | 2.547 | 8.611 | True |
+| calgary/paper2 | 82,199 | 25,738 | 0.313118 | 5.855 | 6.993 | True |
+| calgary/paper3 | 46,526 | 17,854 | 0.383742 | 2.301 | 7.882 | True |
+| calgary/paper4 | 13,286 | 5,572 | 0.419389 | 1.141 | 3.521 | True |
+| calgary/paper5 | 11,954 | 5,053 | 0.422704 | 1.068 | 2.984 | True |
+| calgary/paper6 | 38,105 | 13,163 | 0.345440 | 2.332 | 7.188 | True |
+| calgary/pic | 513,216 | 49,123 | 0.095716 | 0.401 | 41.670 | True |
+| calgary/progc | 39,611 | 13,191 | 0.333014 | 2.469 | 7.025 | True |
+| calgary/progl | 71,646 | 15,975 | 0.222971 | 2.107 | 11.790 | True |
+| calgary/progp | 49,379 | 11,009 | 0.222949 | 2.586 | 9.629 | True |
+| calgary/trans | 93,695 | 18,005 | 0.192166 | 5.415 | 15.151 | True |
+| canterbury/alice29.txt | 152,089 | 43,945 | 0.288943 | 6.409 | 8.565 | True |
+| canterbury/asyoulik.txt | 125,179 | 40,460 | 0.323217 | 5.981 | 7.748 | True |
+| canterbury/cp.html | 24,603 | 7,916 | 0.321749 | 1.616 | 4.900 | True |
+| canterbury/fields.c | 11,150 | 3,131 | 0.280807 | 1.169 | 2.888 | True |
+| canterbury/grammar.lsp | 3,721 | 1,309 | 0.351787 | 0.587 | 1.121 | True |
+| canterbury/kennedy.xls | 1,029,744 | 36,918 | 0.035852 | 2.468 | 100.570 | True |
+| canterbury/lcet10.txt | 426,754 | 108,642 | 0.254578 | 7.667 | 10.495 | True |
+| canterbury/plrabn12.txt | 481,861 | 146,645 | 0.304331 | 7.021 | 9.350 | True |
+| canterbury/ptt5 | 513,216 | 49,124 | 0.095718 | 0.396 | 38.945 | True |
+| canterbury/sum | 38,240 | 12,050 | 0.315115 | 2.977 | 7.054 | True |
+| canterbury/xargs.1 | 4,227 | 1,831 | 0.433168 | 0.605 | 1.180 | True |
 
 ## Change Notes
 
-- QSC3 v11 adds a BWT + MTF2 text transform with a direct adaptive arithmetic byte payload, plus a row-XOR + zero-run transform for row-correlated binary/image-like data.
+- QSC3 v11 adds a large-text fast decision path: when BWT + MTF2 direct arithmetic coding is already clearly strong, the encoder skips losing raw LZ and dictionary candidates.
+- QSC3 v11 keeps the BWT + MTF2 text transform with a direct adaptive arithmetic byte payload, plus a row-XOR + zero-run transform for row-correlated binary/image-like data.
 - On Canterbury + Calgary, QSC3 v11 improves aggregate compressed size from 1,459,754 bytes to 1,321,396 bytes.
 - QSC3 v11 beats Brotli default on aggregate ratio in this benchmark: 0.217970 vs Brotli 0.222249.
-- QSC3 v11 is slower than Brotli in total compression throughput in this run: 0.891 MB/s vs Brotli 1.040 MB/s.
-- QSC3 v11 wins `calgary/geo` and `canterbury/kennedy.xls` by per-file ratio; the aggregate win comes mainly from stronger text compression on `book1`, `book2`, `bib`, and Canterbury text files.
+- QSC3 v11 also beats Brotli default on total compression throughput in this run: 1.398 MB/s vs Brotli 1.040 MB/s.
+- QSC3 v11 decompression remains much slower than Brotli: 12.838 MB/s vs Brotli 488.831 MB/s.
 
 ## Caveats
 
