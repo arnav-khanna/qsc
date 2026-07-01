@@ -60,7 +60,8 @@ def build_algorithms():
 def discover_files():
     files = []
     for path in sorted(DATASET_DIR.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        rel = path.relative_to(DATASET_DIR)
+        if path.is_file() and path.name != "SHA256SUMS" and not any(part.startswith(".") for part in rel.parts):
             files.append(path)
     return files
 
@@ -162,7 +163,7 @@ def benchmark_file(path, algos):
 
     qsc = run_qsc3(path)
     rows.append(result_row(
-        path, "qsc3-v6", original_size, qsc["compressed_size"],
+        path, "qsc3-v7", original_size, qsc["compressed_size"],
         qsc["compression_time"], qsc["decompression_time"], qsc["verified"],
     ))
 
@@ -205,7 +206,7 @@ def print_summary(rows):
             f"({best['ratio']:.6f})"
         )
 
-    qsc_rows = [r for r in rows if r["algorithm"] == "qsc3-v6"]
+    qsc_rows = [r for r in rows if r["algorithm"] == "qsc3-v7"]
     total_original = sum(int(r["original_size"]) for r in qsc_rows)
     total_compressed = sum(int(r["compressed_size"]) for r in qsc_rows)
     if total_original:
@@ -226,7 +227,7 @@ def main():
 
     algos = build_algorithms()
     print(f"Benchmark files: {len(files)}")
-    print("Algorithms:", ", ".join(list(algos) + ["qsc3-v6"]))
+    print("Algorithms:", ", ".join(list(algos) + ["qsc3-v7"]))
 
     rows = []
     for path in files:

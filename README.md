@@ -27,6 +27,7 @@ The active transforms are:
 - raw bytes;
 - a zero-run transform for sparse binary/image-like data;
 - a gated bit-plane transform for selected binary chunks;
+- a gated 4-byte lane shuffle for selected structured binary chunks;
 - a static text-token transform using a built-in dictionary;
 - a dynamic text-token transform using frequent per-chunk words and small delimiter fragments.
 
@@ -58,7 +59,7 @@ The final compressed chunk is the output of the custom arithmetic encoder in `ra
 Input file or directory
 -> archive file table
 -> 8 MiB file chunks
--> optional zero-run, bit-plane, or text-token transform
+-> optional zero-run, bit-plane, shuffle, or text-token transform
 -> optional 512 KiB previous-chunk history for raw chunks
 -> LZ tokenization
 -> split token streams
@@ -82,7 +83,7 @@ All archive-level integer fields are big-endian.
 ```text
 Archive:
   magic              4 bytes      ASCII "QSC3"
-  version            1 byte       currently 6
+  version            1 byte       currently 7
   file_count         uint32
 
   file table[file_count]:
@@ -109,6 +110,7 @@ The `compressed` chunk payload starts with a transform byte:
 2  dynamic text transform payload, decoded without previous-chunk history
 3  zero-run transform payload, decoded without previous-chunk history
 4  bit-plane transform payload, decoded without previous-chunk history
+5  4-byte lane shuffle payload, decoded without previous-chunk history
 ```
 
 For dynamic text chunks, the transform byte is followed by a small dictionary header:
@@ -120,7 +122,7 @@ repeated token_count times:
   token_bytes        token_len bytes
 ```
 
-For bit-plane chunks, the transform byte is followed by a four-byte big-endian original length. The remaining bytes are the arithmetic-coded bit-plane payload.
+For bit-plane and shuffle chunks, the transform byte is followed by a four-byte big-endian original length. The remaining bytes are the arithmetic-coded transformed payload.
 
 The arithmetic-coded stream has this logical order:
 

@@ -79,6 +79,7 @@ static uint64_t read_be64(FILE *f) {
 #define QSC_TRANSFORM_DYN_TEXT 2
 #define QSC_TRANSFORM_RLE  3
 #define QSC_TRANSFORM_BITPLANE 4
+#define QSC_TRANSFORM_SHUFFLE4 5
 #define QSC_TEXT_ESC      0
 
 static const char *QSC_TEXT_DICT[] = {
@@ -276,7 +277,7 @@ static uint8_t *rle_transform_decode(const uint8_t *data, size_t len, size_t *ou
     return result;
 }
 
-static int should_try_bitplane(const uint8_t *data, size_t len) {
+static int should_try_binary_reorder(const uint8_t *data, size_t len) {
     if (len < 65536 || len > 262144 || looks_textual(data, len)) return 0;
 
     size_t printable = 0;
@@ -331,6 +332,45 @@ static uint8_t *bitplane_transform_decode(const uint8_t *data, size_t len,
         }
         out[i] = value;
     }
+
+    *out_len = original_len;
+    return out;
+}
+
+static uint8_t *shuffle4_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
+    uint8_t *out = (uint8_t *)malloc(len);
+    size_t full = (len / 4) * 4;
+    size_t p = 0;
+
+    for (size_t lane = 0; lane < 4; lane++) {
+        for (size_t i = lane; i < full; i += 4) {
+            out[p++] = data[i];
+        }
+    }
+    memcpy(out + p, data + full, len - full);
+
+    *out_len = len;
+    return out;
+}
+
+static uint8_t *shuffle4_transform_decode(const uint8_t *data, size_t len,
+                                          size_t original_len, size_t *out_len) {
+    if (len < original_len) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *out = (uint8_t *)malloc(original_len);
+    size_t full = (original_len / 4) * 4;
+    size_t lane_len = full / 4;
+
+    for (size_t lane = 0; lane < 4; lane++) {
+        const uint8_t *src = data + lane * lane_len;
+        for (size_t j = 0; j < lane_len; j++) {
+            out[j * 4 + lane] = src[j];
+        }
+    }
+    memcpy(out + full, data + full, original_len - full);
 
     *out_len = original_len;
     return out;
@@ -561,7 +601,7 @@ static uint8_t *dynamic_transform_decode(const uint8_t *data, size_t len,
 }
 
 /* ======================================================================
- * Compress payload — v5: REP2 + adaptive models + arithmetic coding
+ * Compress payload — REP2 + adaptive models + arithmetic coding
  *
  * Stream order:
  *   [metadata] [instructions] [lengths/QS] [literals] [rep_types] [offsets]
@@ -694,14 +734,14 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
     }
     free(rle);
 
-    if (should_try_bitplane(chunk, chunk_len)) {
-        size_t bp_len;
-        uint8_t *bp = bitplane_transform_encode(chunk, chunk_len, &bp_len);
-        size_t bp_comp_len;
-        uint8_t *bp_comp = qsc_compress_payload(bp, bp_len, NULL, 0, &bp_comp_len);
-        size_t total = 1 + 4 + bp_comp_len;
+    if (should_try_binary_reorder(chunk, chunk_len)) {
+        size_t shuf_len;
+        uint8_t *shuf = shuffle4_transform_encode(chunk, chunk_len, &shuf_len);
+        size_t shuf_comp_len;
+        uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
+        size_t shuf_total = 1 + 4 + shuf_comp_len;
 
-        if (total < chosen_total) {
+        if (shuf_total < chosen_total) {
             uint8_t *header = (uint8_t *)malloc(4);
             header[0] = (uint8_t)(chunk_len >> 24);
             header[1] = (uint8_t)(chunk_len >> 16);
@@ -710,16 +750,44 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
 
             free(chosen);
             free(chosen_header);
-            chosen = bp_comp;
-            chosen_len = bp_comp_len;
+            chosen = shuf_comp;
+            chosen_len = shuf_comp_len;
             chosen_header = header;
             chosen_header_len = 4;
-            chosen_total = total;
-            chosen_flag = QSC_TRANSFORM_BITPLANE;
+            chosen_total = shuf_total;
+            chosen_flag = QSC_TRANSFORM_SHUFFLE4;
         } else {
-            free(bp_comp);
+            free(shuf_comp);
         }
-        free(bp);
+        free(shuf);
+
+        if (chosen_flag != QSC_TRANSFORM_SHUFFLE4) {
+            size_t bp_len;
+            uint8_t *bp = bitplane_transform_encode(chunk, chunk_len, &bp_len);
+            size_t bp_comp_len;
+            uint8_t *bp_comp = qsc_compress_payload(bp, bp_len, NULL, 0, &bp_comp_len);
+            size_t total = 1 + 4 + bp_comp_len;
+
+            if (total < chosen_total) {
+                uint8_t *header = (uint8_t *)malloc(4);
+                header[0] = (uint8_t)(chunk_len >> 24);
+                header[1] = (uint8_t)(chunk_len >> 16);
+                header[2] = (uint8_t)(chunk_len >> 8);
+                header[3] = (uint8_t)chunk_len;
+
+                free(chosen);
+                free(chosen_header);
+                chosen = bp_comp;
+                chosen_len = bp_comp_len;
+                chosen_header = header;
+                chosen_header_len = 4;
+                chosen_total = total;
+                chosen_flag = QSC_TRANSFORM_BITPLANE;
+            } else {
+                free(bp_comp);
+            }
+            free(bp);
+        }
     }
 
     if (looks_textual(chunk, chunk_len)) {
@@ -935,6 +1003,23 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         uint8_t *bp = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &bp_len);
         uint8_t *decoded = bitplane_transform_decode(bp, bp_len, original_len, out_len);
         free(bp);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_SHUFFLE4) {
+        if (payload_len < 4) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        size_t shuf_len;
+        uint8_t *shuf = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &shuf_len);
+        uint8_t *decoded = shuffle4_transform_decode(shuf, shuf_len, original_len, out_len);
+        free(shuf);
         return decoded;
     }
 
