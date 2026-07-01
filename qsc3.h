@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 #define QSC_MAGIC      "QSC3"
-#define QSC_VERSION    10        /* v10: ratio-first transform selection with arithmetic payloads */
+#define QSC_VERSION    11        /* v11: ratio-first transforms with BWT/MTF text candidate */
 #define QSC_CHUNK_SIZE 8388608   /* 8 MB */
 #define QSC_CARRY_OVER 524288   /* 512 KB */
 #define QSC_NUM_THREADS 0       /* 0 = auto-detect */

@@ -81,6 +81,13 @@ static uint64_t read_be64(FILE *f) {
 #define QSC_TRANSFORM_BITPLANE 4
 #define QSC_TRANSFORM_SHUFFLE4 5
 #define QSC_TRANSFORM_SHUFFLE13 6
+#define QSC_TRANSFORM_BWT_MTF 7
+#define QSC_TRANSFORM_BWT_RAW 8
+#define QSC_TRANSFORM_ROW_XOR 9
+#define QSC_TRANSFORM_ROW_XOR_RLE 10
+#define QSC_TRANSFORM_BWT_MTF_DIRECT 11
+#define QSC_TRANSFORM_BWT_RAW_DIRECT 12
+#define QSC_TRANSFORM_BWT_MTF2_DIRECT 13
 #define QSC_PAYLOAD_FAST 0x80
 #define QSC_TRANSFORM_MASK 0x7F
 #define QSC_TEXT_ESC      0
@@ -132,12 +139,16 @@ static const char *QSC_TEXT_DICT[] = {
 static int looks_textual(const uint8_t *data, size_t len) {
     if (len == 0) return 0;
     size_t text = 0;
+    size_t controls = 0;
     for (size_t i = 0; i < len; i++) {
         uint8_t c = data[i];
-        if (c == 0) return 0;
-        if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') text++;
+        if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') {
+            text++;
+        } else {
+            controls++;
+        }
     }
-    return text * 100 >= len * 95;
+    return text * 100 >= len * 95 && controls * 1000 <= len;
 }
 
 static uint8_t *text_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
@@ -444,6 +455,485 @@ static uint8_t *shuffle13_transform_decode(const uint8_t *data, size_t len,
 
     *out_len = original_len;
     return out;
+}
+
+static int should_try_row_xor(const uint8_t *data, size_t len, size_t *row_width) {
+    if (len < 65536 || looks_textual(data, len)) return 0;
+
+    static const size_t widths[] = {216, 256, 512, 1024};
+    size_t best_width = 0;
+    size_t best_same = 0;
+
+    for (size_t wi = 0; wi < sizeof(widths) / sizeof(widths[0]); wi++) {
+        size_t w = widths[wi];
+        if (len <= w) continue;
+        size_t same = 0;
+        for (size_t i = w; i < len; i++) {
+            if (data[i] == data[i - w]) same++;
+        }
+        if (same > best_same) {
+            best_same = same;
+            best_width = w;
+        }
+    }
+
+    if (best_width == 0) return 0;
+    if (best_same * 100 < (len - best_width) * 85) return 0;
+    *row_width = best_width;
+    return 1;
+}
+
+static uint8_t *row_xor_transform_encode(const uint8_t *data, size_t len,
+                                         size_t row_width, size_t *out_len)
+{
+    uint8_t *out = (uint8_t *)malloc(len);
+    memcpy(out, data, row_width);
+    for (size_t i = row_width; i < len; i++) {
+        out[i] = data[i] ^ data[i - row_width];
+    }
+    *out_len = len;
+    return out;
+}
+
+static uint8_t *row_xor_transform_decode(const uint8_t *data, size_t len,
+                                         size_t original_len, size_t row_width,
+                                         size_t *out_len)
+{
+    if (len < original_len || row_width == 0 || row_width > original_len) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *out = (uint8_t *)malloc(original_len);
+    memcpy(out, data, row_width);
+    for (size_t i = row_width; i < original_len; i++) {
+        out[i] = data[i] ^ out[i - row_width];
+    }
+    *out_len = original_len;
+    return out;
+}
+
+static void transform_write_varint(ByteBuffer *out, size_t value) {
+    while (value >= 0x80) {
+        ByteBuffer_push(out, (uint8_t)((value & 0x7F) | 0x80));
+        value >>= 7;
+    }
+    ByteBuffer_push(out, (uint8_t)value);
+}
+
+static size_t transform_read_varint(const uint8_t **p, const uint8_t *end, int *ok) {
+    size_t value = 0;
+    int shift = 0;
+    while (*p < end && shift < (int)(sizeof(size_t) * 8)) {
+        uint8_t byte_val = *(*p)++;
+        value |= (size_t)(byte_val & 0x7F) << shift;
+        if ((byte_val & 0x80) == 0) return value;
+        shift += 7;
+    }
+    *ok = 0;
+    return 0;
+}
+
+static int bwt_build_suffix_array(const uint8_t *data, size_t len, int32_t **out_sa) {
+    if (len == 0 || len > INT32_MAX) return 0;
+
+    int32_t n = (int32_t)len;
+    int32_t count_size = n > 256 ? n : 256;
+    int32_t *p = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    int32_t *pn = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    int32_t *c = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    int32_t *cn = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+    int32_t *cnt = (int32_t *)calloc((size_t)count_size, sizeof(int32_t));
+    int32_t *pos = (int32_t *)malloc((size_t)count_size * sizeof(int32_t));
+    if (!p || !pn || !c || !cn || !cnt || !pos) {
+        free(p); free(pn); free(c); free(cn); free(cnt); free(pos);
+        return 0;
+    }
+
+    for (int32_t i = 0; i < n; i++) cnt[data[i]]++;
+    pos[0] = 0;
+    for (int32_t i = 1; i < 256; i++) pos[i] = pos[i - 1] + cnt[i - 1];
+    for (int32_t i = 0; i < n; i++) {
+        uint8_t ch = data[i];
+        p[pos[ch]++] = i;
+    }
+
+    int32_t classes = 1;
+    c[p[0]] = 0;
+    for (int32_t i = 1; i < n; i++) {
+        if (data[p[i]] != data[p[i - 1]]) classes++;
+        c[p[i]] = classes - 1;
+    }
+
+    for (int32_t h = 1; h < n && classes < n; h <<= 1) {
+        for (int32_t i = 0; i < n; i++) {
+            pn[i] = p[i] - h;
+            if (pn[i] < 0) pn[i] += n;
+        }
+
+        memset(cnt, 0, (size_t)classes * sizeof(int32_t));
+        for (int32_t i = 0; i < n; i++) cnt[c[pn[i]]]++;
+        pos[0] = 0;
+        for (int32_t i = 1; i < classes; i++) pos[i] = pos[i - 1] + cnt[i - 1];
+        for (int32_t i = 0; i < n; i++) {
+            int32_t cl = c[pn[i]];
+            p[pos[cl]++] = pn[i];
+        }
+
+        cn[p[0]] = 0;
+        int32_t new_classes = 1;
+        for (int32_t i = 1; i < n; i++) {
+            int32_t cur1 = c[p[i]];
+            int32_t cur2 = c[(p[i] + h) % n];
+            int32_t prev1 = c[p[i - 1]];
+            int32_t prev2 = c[(p[i - 1] + h) % n];
+            if (cur1 != prev1 || cur2 != prev2) new_classes++;
+            cn[p[i]] = new_classes - 1;
+        }
+
+        int32_t *tmp = c;
+        c = cn;
+        cn = tmp;
+        classes = new_classes;
+    }
+
+    free(pn); free(c); free(cn); free(cnt); free(pos);
+    *out_sa = p;
+    return 1;
+}
+
+static QSC_UNUSED uint8_t *bwt_mtf_transform_encode(const uint8_t *data, size_t len,
+                                                    uint32_t *primary_index,
+                                                    size_t *out_len)
+{
+    int32_t *sa = NULL;
+    if (!bwt_build_suffix_array(data, len, &sa)) return NULL;
+
+    uint8_t *bwt = (uint8_t *)malloc(len);
+    if (!bwt) {
+        free(sa);
+        return NULL;
+    }
+
+    *primary_index = 0;
+    for (size_t row = 0; row < len; row++) {
+        int32_t start = sa[row];
+        if (start == 0) *primary_index = (uint32_t)row;
+        bwt[row] = data[(start + (int32_t)len - 1) % (int32_t)len];
+    }
+    free(sa);
+
+    uint8_t mtf[256];
+    for (int i = 0; i < 256; i++) mtf[i] = (uint8_t)i;
+
+    ByteBuffer out;
+    ByteBuffer_init(&out);
+    ByteBuffer_reserve(&out, len);
+
+    size_t zero_run = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t value = bwt[i];
+        int rank = 0;
+        while (mtf[rank] != value) rank++;
+
+        if (rank == 0) {
+            zero_run++;
+            continue;
+        }
+
+        if (zero_run > 0) {
+            ByteBuffer_push(&out, 0);
+            transform_write_varint(&out, zero_run);
+            zero_run = 0;
+        }
+
+        ByteBuffer_push(&out, (uint8_t)rank);
+        memmove(mtf + 1, mtf, (size_t)rank);
+        mtf[0] = value;
+    }
+
+    if (zero_run > 0) {
+        ByteBuffer_push(&out, 0);
+        transform_write_varint(&out, zero_run);
+    }
+
+    free(bwt);
+
+    uint8_t *result = (uint8_t *)malloc(out.len ? out.len : 1);
+    if (out.len > 0) memcpy(result, out.data, out.len);
+    *out_len = out.len;
+    ByteBuffer_free(&out);
+    return result;
+}
+
+static void mtf2_flush_zero_run(ByteBuffer *out, size_t *zero_run) {
+    size_t run = *zero_run;
+    while (run > 0) {
+        ByteBuffer_push(out, (uint8_t)(run & 1u));
+        run >>= 1;
+    }
+    *zero_run = 0;
+}
+
+static uint8_t *bwt_mtf2_transform_encode(const uint8_t *data, size_t len,
+                                          uint32_t *primary_index,
+                                          size_t *out_len)
+{
+    int32_t *sa = NULL;
+    if (!bwt_build_suffix_array(data, len, &sa)) return NULL;
+
+    uint8_t *bwt = (uint8_t *)malloc(len);
+    if (!bwt) {
+        free(sa);
+        return NULL;
+    }
+
+    *primary_index = 0;
+    for (size_t row = 0; row < len; row++) {
+        int32_t start = sa[row];
+        if (start == 0) *primary_index = (uint32_t)row;
+        bwt[row] = data[(start + (int32_t)len - 1) % (int32_t)len];
+    }
+    free(sa);
+
+    uint8_t mtf[256];
+    for (int i = 0; i < 256; i++) mtf[i] = (uint8_t)i;
+
+    ByteBuffer out;
+    ByteBuffer_init(&out);
+    ByteBuffer_reserve(&out, len);
+
+    size_t zero_run = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t value = bwt[i];
+        int rank = 0;
+        while (mtf[rank] != value) rank++;
+
+        if (rank == 0) {
+            zero_run++;
+            continue;
+        }
+
+        if (zero_run > 0) mtf2_flush_zero_run(&out, &zero_run);
+
+        if (rank <= 253) {
+            ByteBuffer_push(&out, (uint8_t)(rank + 1));
+        } else {
+            ByteBuffer_push(&out, 255);
+            ByteBuffer_push(&out, (uint8_t)(rank - 254));
+        }
+        memmove(mtf + 1, mtf, (size_t)rank);
+        mtf[0] = value;
+    }
+
+    if (zero_run > 0) mtf2_flush_zero_run(&out, &zero_run);
+    free(bwt);
+
+    uint8_t *result = (uint8_t *)malloc(out.len ? out.len : 1);
+    if (out.len > 0) memcpy(result, out.data, out.len);
+    *out_len = out.len;
+    ByteBuffer_free(&out);
+    return result;
+}
+
+static QSC_UNUSED uint8_t *bwt_transform_encode(const uint8_t *data, size_t len,
+                                                uint32_t *primary_index,
+                                                size_t *out_len)
+{
+    int32_t *sa = NULL;
+    if (!bwt_build_suffix_array(data, len, &sa)) return NULL;
+
+    uint8_t *bwt = (uint8_t *)malloc(len);
+    if (!bwt) {
+        free(sa);
+        return NULL;
+    }
+
+    *primary_index = 0;
+    for (size_t row = 0; row < len; row++) {
+        int32_t start = sa[row];
+        if (start == 0) *primary_index = (uint32_t)row;
+        bwt[row] = data[(start + (int32_t)len - 1) % (int32_t)len];
+    }
+
+    free(sa);
+    *out_len = len;
+    return bwt;
+}
+
+static uint8_t *bwt_inverse_transform(const uint8_t *bwt, size_t original_len,
+                                      uint32_t primary_index, size_t *out_len)
+{
+    if (original_len == 0 || primary_index >= original_len) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    int32_t counts[256] = {0};
+    for (size_t i = 0; i < original_len; i++) counts[bwt[i]]++;
+
+    int32_t starts[256];
+    starts[0] = 0;
+    for (int i = 1; i < 256; i++) starts[i] = starts[i - 1] + counts[i - 1];
+
+    int32_t seen[256] = {0};
+    int32_t *next = (int32_t *)malloc(original_len * sizeof(int32_t));
+    uint8_t *out = (uint8_t *)malloc(original_len);
+    if (!next || !out) {
+        free(next); free(out);
+        *out_len = 0;
+        return NULL;
+    }
+
+    for (size_t i = 0; i < original_len; i++) {
+        uint8_t ch = bwt[i];
+        next[starts[ch] + seen[ch]++] = (int32_t)i;
+    }
+
+    int32_t idx = (int32_t)primary_index;
+    for (size_t i = 0; i < original_len; i++) {
+        idx = next[idx];
+        out[i] = bwt[idx];
+    }
+
+    free(next);
+    *out_len = original_len;
+    return out;
+}
+
+static uint8_t *bwt_mtf_transform_decode(const uint8_t *data, size_t len,
+                                         size_t original_len, uint32_t primary_index,
+                                         size_t *out_len)
+{
+    if (original_len == 0) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *bwt = (uint8_t *)malloc(original_len);
+    uint8_t mtf[256];
+    if (!bwt) {
+        *out_len = 0;
+        return NULL;
+    }
+    for (int i = 0; i < 256; i++) mtf[i] = (uint8_t)i;
+
+    const uint8_t *p = data;
+    const uint8_t *end = data + len;
+    size_t out_pos = 0;
+    int ok = 1;
+    while (p < end && out_pos < original_len && ok) {
+        uint8_t code = *p++;
+        if (code == 0) {
+            size_t run = transform_read_varint(&p, end, &ok);
+            if (!ok || out_pos + run > original_len) {
+                ok = 0;
+                break;
+            }
+            memset(bwt + out_pos, mtf[0], run);
+            out_pos += run;
+            continue;
+        }
+
+        uint8_t value = mtf[code];
+        bwt[out_pos++] = value;
+        memmove(mtf + 1, mtf, code);
+        mtf[0] = value;
+    }
+
+    if (!ok || out_pos != original_len) {
+        free(bwt);
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *decoded = bwt_inverse_transform(bwt, original_len, primary_index, out_len);
+    free(bwt);
+    return decoded;
+}
+
+static uint8_t *bwt_mtf2_transform_decode(const uint8_t *data, size_t len,
+                                          size_t original_len, uint32_t primary_index,
+                                          size_t *out_len)
+{
+    if (original_len == 0) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *bwt = (uint8_t *)malloc(original_len);
+    uint8_t mtf[256];
+    if (!bwt) {
+        *out_len = 0;
+        return NULL;
+    }
+    for (int i = 0; i < 256; i++) mtf[i] = (uint8_t)i;
+
+    size_t out_pos = 0;
+    size_t run = 0;
+    int shift = 0;
+    int ok = 1;
+
+    for (size_t p = 0; p < len && ok; p++) {
+        uint8_t code = data[p];
+        if (code <= 1) {
+            if (shift >= (int)(sizeof(size_t) * 8)) {
+                ok = 0;
+                break;
+            }
+            run |= (size_t)code << shift;
+            shift++;
+            continue;
+        }
+
+        if (out_pos + run > original_len) {
+            ok = 0;
+            break;
+        }
+        memset(bwt + out_pos, mtf[0], run);
+        out_pos += run;
+        run = 0;
+        shift = 0;
+
+        int rank;
+        if (code == 255) {
+            if (++p >= len || data[p] > 1) {
+                ok = 0;
+                break;
+            }
+            rank = 254 + data[p];
+        } else {
+            rank = (int)code - 1;
+        }
+
+        uint8_t value = mtf[rank];
+        if (out_pos >= original_len) {
+            ok = 0;
+            break;
+        }
+        bwt[out_pos++] = value;
+        memmove(mtf + 1, mtf, (size_t)rank);
+        mtf[0] = value;
+    }
+
+    if (ok && run > 0) {
+        if (out_pos + run > original_len) {
+            ok = 0;
+        } else {
+            memset(bwt + out_pos, mtf[0], run);
+            out_pos += run;
+        }
+    }
+
+    if (!ok || out_pos != original_len) {
+        free(bwt);
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *decoded = bwt_inverse_transform(bwt, original_len, primary_index, out_len);
+    free(bwt);
+    return decoded;
 }
 
 typedef struct {
@@ -769,6 +1259,33 @@ static uint8_t *qsc_compress_payload(const uint8_t *chunk, size_t chunk_len,
     return result;
 }
 
+static uint8_t *qsc_compress_literal_payload(const uint8_t *chunk, size_t chunk_len,
+                                             size_t *out_len)
+{
+    ArithEncoder enc;
+    arith_enc_init(&enc);
+    arith_enc_encode_varint(&enc, (uint32_t)chunk_len);
+
+    MixedLiteralModel *lit_model = (MixedLiteralModel *)malloc(sizeof(MixedLiteralModel));
+    mixed_lit_init(lit_model);
+    mixed_lit_set_match_ctx(lit_model, 0);
+    for (size_t i = 0; i < chunk_len; i++) {
+        mixed_lit_encode(lit_model, &enc, chunk[i]);
+    }
+    mixed_lit_free(lit_model);
+    free(lit_model);
+
+    arith_enc_flush(&enc);
+
+    size_t len;
+    uint8_t *bytes = arith_enc_get_bytes(&enc, &len);
+    uint8_t *result = (uint8_t *)malloc(len);
+    memcpy(result, bytes, len);
+    *out_len = len;
+    arith_enc_free(&enc);
+    return result;
+}
+
 static void fast_write_varint(ByteBuffer *out, uint32_t value) {
     while (value >= 0x80) {
         ByteBuffer_push(out, (uint8_t)((value & 0x7F) | 0x80));
@@ -888,22 +1405,6 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
             return result;
         }
         free(shuf_comp);
-    } else {
-        size_t rle_len;
-        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
-        if (rle_len < chunk_len) {
-            size_t rle_comp_len;
-            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
-
-            if ((1 + rle_comp_len) * 8 <= chunk_len) {
-                uint8_t *result = wrap_chunk_payload(QSC_TRANSFORM_RLE, NULL, 0,
-                                                     rle_comp, rle_comp_len, out_len);
-                free(rle);
-                return result;
-            }
-            free(rle_comp);
-        }
-        free(rle);
     }
 
     size_t raw_len;
@@ -937,6 +1438,65 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
             }
         }
         free(rle);
+    }
+
+    size_t row_width = 0;
+    if (should_try_row_xor(chunk, chunk_len, &row_width)) {
+        size_t rx_len;
+        uint8_t *rx = row_xor_transform_encode(chunk, chunk_len, row_width, &rx_len);
+        size_t rx_comp_len;
+        uint8_t *rx_comp = qsc_compress_payload(rx, rx_len, NULL, 0, &rx_comp_len);
+        size_t total = 1 + 8 + rx_comp_len;
+
+        if (total < chosen_total) {
+            uint8_t *header = (uint8_t *)malloc(8);
+            write_len_header(header, chunk_len);
+            header[4] = (uint8_t)(row_width >> 24);
+            header[5] = (uint8_t)(row_width >> 16);
+            header[6] = (uint8_t)(row_width >> 8);
+            header[7] = (uint8_t)row_width;
+
+            free(chosen);
+            free(chosen_header);
+            chosen = rx_comp;
+            chosen_len = rx_comp_len;
+            chosen_header = header;
+            chosen_header_len = 8;
+            chosen_total = total;
+            chosen_flag = QSC_TRANSFORM_ROW_XOR;
+        } else {
+            free(rx_comp);
+        }
+        free(rx);
+
+        rx = row_xor_transform_encode(chunk, chunk_len, row_width, &rx_len);
+        size_t rx_rle_len;
+        uint8_t *rx_rle = rle_transform_encode(rx, rx_len, &rx_rle_len);
+        size_t rx_rle_comp_len;
+        uint8_t *rx_rle_comp = qsc_compress_payload(rx_rle, rx_rle_len, NULL, 0, &rx_rle_comp_len);
+        total = 1 + 8 + rx_rle_comp_len;
+
+        if (total < chosen_total) {
+            uint8_t *header = (uint8_t *)malloc(8);
+            write_len_header(header, chunk_len);
+            header[4] = (uint8_t)(row_width >> 24);
+            header[5] = (uint8_t)(row_width >> 16);
+            header[6] = (uint8_t)(row_width >> 8);
+            header[7] = (uint8_t)row_width;
+
+            free(chosen);
+            free(chosen_header);
+            chosen = rx_rle_comp;
+            chosen_len = rx_rle_comp_len;
+            chosen_header = header;
+            chosen_header_len = 8;
+            chosen_total = total;
+            chosen_flag = QSC_TRANSFORM_ROW_XOR_RLE;
+        } else {
+            free(rx_rle_comp);
+        }
+        free(rx_rle);
+        free(rx);
     }
 
     if (should_try_binary_reorder(chunk, chunk_len)) {
@@ -1054,6 +1614,38 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
             free(dyn);
         }
         free_dyn_tokens(tokens, token_count);
+
+        if (chunk_len >= 65536 && chunk_len <= 1048576) {
+            uint32_t primary_index = 0;
+            size_t bwt_len;
+            uint8_t *bwt2 = bwt_mtf2_transform_encode(chunk, chunk_len, &primary_index, &bwt_len);
+            if (bwt2) {
+                size_t bwt2_direct_len;
+                uint8_t *bwt2_direct = qsc_compress_literal_payload(bwt2, bwt_len, &bwt2_direct_len);
+                size_t total = 1 + 8 + bwt2_direct_len;
+
+                if (total < chosen_total) {
+                    uint8_t *header = (uint8_t *)malloc(8);
+                    write_len_header(header, chunk_len);
+                    header[4] = (uint8_t)(primary_index >> 24);
+                    header[5] = (uint8_t)(primary_index >> 16);
+                    header[6] = (uint8_t)(primary_index >> 8);
+                    header[7] = (uint8_t)primary_index;
+
+                    free(chosen);
+                    free(chosen_header);
+                    chosen = bwt2_direct;
+                    chosen_len = bwt2_direct_len;
+                    chosen_header = header;
+                    chosen_header_len = 8;
+                    chosen_total = total;
+                    chosen_flag = QSC_TRANSFORM_BWT_MTF2_DIRECT;
+                } else {
+                    free(bwt2_direct);
+                }
+                free(bwt2);
+            }
+        }
     }
 
     uint8_t *result = (uint8_t *)malloc(chosen_len + chosen_header_len + 1);
@@ -1158,6 +1750,27 @@ static uint8_t *qsc_decompress_payload(const uint8_t *compressed, size_t comp_le
 
     *out_len = decompressed_len;
     return decompressed;
+}
+
+static uint8_t *qsc_decompress_literal_payload(const uint8_t *compressed, size_t comp_len,
+                                               size_t *out_len)
+{
+    ArithDecoder dec;
+    arith_dec_init(&dec, compressed, comp_len);
+    uint32_t len = arith_dec_decode_varint(&dec);
+    uint8_t *out = (uint8_t *)malloc(len ? len : 1);
+
+    MixedLiteralModel *lit_model = (MixedLiteralModel *)malloc(sizeof(MixedLiteralModel));
+    mixed_lit_init(lit_model);
+    mixed_lit_set_match_ctx(lit_model, 0);
+    for (uint32_t i = 0; i < len; i++) {
+        out[i] = mixed_lit_decode(lit_model, &dec);
+    }
+    mixed_lit_free(lit_model);
+    free(lit_model);
+
+    *out_len = len;
+    return out;
 }
 
 static uint8_t *qsc_decompress_payload_fast(const uint8_t *compressed, size_t comp_len,
@@ -1341,6 +1954,166 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         uint8_t *shuf = qsc_decompress_payload_auto(fast_payload, payload + 4, payload_len - 4, NULL, 0, &shuf_len);
         uint8_t *decoded = shuffle13_transform_decode(shuf, shuf_len, original_len, out_len);
         free(shuf);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_ROW_XOR) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        size_t row_width = ((size_t)payload[4] << 24) |
+                           ((size_t)payload[5] << 16) |
+                           ((size_t)payload[6] << 8)  |
+                           (size_t)payload[7];
+        size_t rx_len;
+        uint8_t *rx = qsc_decompress_payload_auto(fast_payload, payload + 8, payload_len - 8, NULL, 0, &rx_len);
+        uint8_t *decoded = row_xor_transform_decode(rx, rx_len, original_len, row_width, out_len);
+        free(rx);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_ROW_XOR_RLE) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        size_t row_width = ((size_t)payload[4] << 24) |
+                           ((size_t)payload[5] << 16) |
+                           ((size_t)payload[6] << 8)  |
+                           (size_t)payload[7];
+        size_t rx_rle_len;
+        uint8_t *rx_rle = qsc_decompress_payload_auto(fast_payload, payload + 8, payload_len - 8, NULL, 0, &rx_rle_len);
+        size_t rx_len;
+        uint8_t *rx = rle_transform_decode(rx_rle, rx_rle_len, &rx_len);
+        free(rx_rle);
+        uint8_t *decoded = row_xor_transform_decode(rx, rx_len, original_len, row_width, out_len);
+        free(rx);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_BWT_RAW) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        uint32_t primary_index = ((uint32_t)payload[4] << 24) |
+                                 ((uint32_t)payload[5] << 16) |
+                                 ((uint32_t)payload[6] << 8)  |
+                                 (uint32_t)payload[7];
+        size_t bwt_len;
+        uint8_t *bwt = qsc_decompress_payload_auto(fast_payload, payload + 8, payload_len - 8, NULL, 0, &bwt_len);
+        if (bwt_len != original_len) {
+            free(bwt);
+            *out_len = 0;
+            return NULL;
+        }
+        uint8_t *decoded = bwt_inverse_transform(bwt, original_len, primary_index, out_len);
+        free(bwt);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_BWT_RAW_DIRECT) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        uint32_t primary_index = ((uint32_t)payload[4] << 24) |
+                                 ((uint32_t)payload[5] << 16) |
+                                 ((uint32_t)payload[6] << 8)  |
+                                 (uint32_t)payload[7];
+        size_t bwt_len;
+        uint8_t *bwt = qsc_decompress_literal_payload(payload + 8, payload_len - 8, &bwt_len);
+        if (bwt_len != original_len) {
+            free(bwt);
+            *out_len = 0;
+            return NULL;
+        }
+        uint8_t *decoded = bwt_inverse_transform(bwt, original_len, primary_index, out_len);
+        free(bwt);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_BWT_MTF) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        uint32_t primary_index = ((uint32_t)payload[4] << 24) |
+                                 ((uint32_t)payload[5] << 16) |
+                                 ((uint32_t)payload[6] << 8)  |
+                                 (uint32_t)payload[7];
+        size_t bwt_len;
+        uint8_t *bwt = qsc_decompress_payload_auto(fast_payload, payload + 8, payload_len - 8, NULL, 0, &bwt_len);
+        uint8_t *decoded = bwt_mtf_transform_decode(bwt, bwt_len, original_len, primary_index, out_len);
+        free(bwt);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_BWT_MTF_DIRECT) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        uint32_t primary_index = ((uint32_t)payload[4] << 24) |
+                                 ((uint32_t)payload[5] << 16) |
+                                 ((uint32_t)payload[6] << 8)  |
+                                 (uint32_t)payload[7];
+        size_t bwt_len;
+        uint8_t *bwt = qsc_decompress_literal_payload(payload + 8, payload_len - 8, &bwt_len);
+        uint8_t *decoded = bwt_mtf_transform_decode(bwt, bwt_len, original_len, primary_index, out_len);
+        free(bwt);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_BWT_MTF2_DIRECT) {
+        if (payload_len < 8) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        uint32_t primary_index = ((uint32_t)payload[4] << 24) |
+                                 ((uint32_t)payload[5] << 16) |
+                                 ((uint32_t)payload[6] << 8)  |
+                                 (uint32_t)payload[7];
+        size_t bwt_len;
+        uint8_t *bwt = qsc_decompress_literal_payload(payload + 8, payload_len - 8, &bwt_len);
+        uint8_t *decoded = bwt_mtf2_transform_decode(bwt, bwt_len, original_len, primary_index, out_len);
+        free(bwt);
         return decoded;
     }
 
