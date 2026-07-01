@@ -81,6 +81,8 @@ static uint64_t read_be64(FILE *f) {
 #define QSC_TRANSFORM_BITPLANE 4
 #define QSC_TRANSFORM_SHUFFLE4 5
 #define QSC_TRANSFORM_SHUFFLE13 6
+#define QSC_PAYLOAD_FAST 0x80
+#define QSC_TRANSFORM_MASK 0x7F
 #define QSC_TEXT_ESC      0
 
 static const char *QSC_TEXT_DICT[] = {
@@ -295,6 +297,17 @@ static int should_try_binary_reorder(const uint8_t *data, size_t len) {
            zero_pct >= 15 && zero_pct <= 40;
 }
 
+static int should_try_zero_run(const uint8_t *data, size_t len) {
+    if (len < 65536 || looks_textual(data, len)) return 0;
+
+    size_t zeros = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] == 0) zeros++;
+    }
+
+    return zeros * 100 >= len * 15;
+}
+
 static int should_try_spreadsheet_reorder(const uint8_t *data, size_t len) {
     if (len < 262144 || len > 2097152 || looks_textual(data, len)) return 0;
 
@@ -312,7 +325,7 @@ static int should_try_spreadsheet_reorder(const uint8_t *data, size_t len) {
            zero_pct >= 30 && zero_pct <= 60;
 }
 
-static uint8_t *bitplane_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
+static QSC_UNUSED uint8_t *bitplane_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
     size_t stride = (len + 7) / 8;
     size_t total = stride * 8;
     uint8_t *out = (uint8_t *)calloc(total, 1);
@@ -756,42 +769,118 @@ static uint8_t *qsc_compress_payload(const uint8_t *chunk, size_t chunk_len,
     return result;
 }
 
+static void fast_write_varint(ByteBuffer *out, uint32_t value) {
+    while (value >= 0x80) {
+        ByteBuffer_push(out, (uint8_t)((value & 0x7F) | 0x80));
+        value >>= 7;
+    }
+    ByteBuffer_push(out, (uint8_t)value);
+}
+
+static uint32_t fast_read_varint(const uint8_t **p, const uint8_t *end) {
+    uint32_t value = 0;
+    int shift = 0;
+    while (*p < end && shift <= 28) {
+        uint8_t byte_val = *(*p)++;
+        value |= (uint32_t)(byte_val & 0x7F) << shift;
+        if ((byte_val & 0x80) == 0) break;
+        shift += 7;
+    }
+    return value;
+}
+
+static uint8_t *qsc_compress_payload_fast(const uint8_t *chunk, size_t chunk_len,
+                                          const uint8_t *prev_tail, size_t prev_tail_len,
+                                          size_t *out_len)
+{
+    LZResult lz;
+    lz_compress(chunk, chunk_len, prev_tail, prev_tail_len, &lz);
+
+    ByteBuffer out;
+    ByteBuffer_init(&out);
+    ByteBuffer_reserve(&out, chunk_len / 2 + 64);
+
+    fast_write_varint(&out, (uint32_t)lz.instructions.len);
+    fast_write_varint(&out, (uint32_t)lz.literals.len);
+    fast_write_varint(&out, (uint32_t)lz.rep_types.len);
+    fast_write_varint(&out, (uint32_t)lz.new_offsets.len);
+
+    for (size_t i = 0; i < lz.instructions.len; i += 8) {
+        uint8_t packed = 0;
+        for (int b = 0; b < 8 && i + (size_t)b < lz.instructions.len; b++) {
+            if (lz.instructions.data[i + (size_t)b] != 0) {
+                packed |= (uint8_t)(1u << b);
+            }
+        }
+        ByteBuffer_push(&out, packed);
+    }
+
+    for (size_t i = 0; i < lz.literals.len; i++) {
+        ByteBuffer_push(&out, (uint8_t)lz.literals.data[i]);
+    }
+
+    for (size_t i = 0; i < lz.lengths.len; i++) {
+        fast_write_varint(&out, (uint32_t)lz.lengths.data[i]);
+    }
+
+    for (size_t i = 0; i < lz.rep_types.len; i += 4) {
+        uint8_t packed = 0;
+        for (int b = 0; b < 4 && i + (size_t)b < lz.rep_types.len; b++) {
+            packed |= (uint8_t)((lz.rep_types.data[i + (size_t)b] & 3) << (b * 2));
+        }
+        ByteBuffer_push(&out, packed);
+    }
+
+    for (size_t i = 0; i < lz.new_offsets.len; i++) {
+        fast_write_varint(&out, (uint32_t)lz.new_offsets.data[i]);
+    }
+
+    uint8_t *result = (uint8_t *)malloc(out.len);
+    memcpy(result, out.data, out.len);
+    *out_len = out.len;
+
+    ByteBuffer_free(&out);
+    lz_result_free(&lz);
+    return result;
+}
+
+static void write_len_header(uint8_t header[4], size_t len) {
+    header[0] = (uint8_t)(len >> 24);
+    header[1] = (uint8_t)(len >> 16);
+    header[2] = (uint8_t)(len >> 8);
+    header[3] = (uint8_t)len;
+}
+
+static uint8_t *wrap_chunk_payload(uint8_t flag,
+                                   const uint8_t *header, size_t header_len,
+                                   uint8_t *payload, size_t payload_len,
+                                   size_t *out_len)
+{
+    uint8_t *result = (uint8_t *)malloc(payload_len + header_len + 1);
+    result[0] = flag;
+    if (header_len > 0) {
+        memcpy(result + 1, header, header_len);
+    }
+    memcpy(result + 1 + header_len, payload, payload_len);
+    *out_len = payload_len + header_len + 1;
+    free(payload);
+    return result;
+}
+
 uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
                             const uint8_t *prev_tail, size_t prev_tail_len,
                             size_t *out_len)
 {
-    size_t raw_len;
-    uint8_t *raw = qsc_compress_payload(chunk, chunk_len, prev_tail, prev_tail_len, &raw_len);
-
-    uint8_t chosen_flag = QSC_TRANSFORM_RAW;
-    uint8_t *chosen = raw;
-    size_t chosen_len = raw_len;
-    uint8_t *chosen_header = NULL;
-    size_t chosen_header_len = 0;
-    size_t chosen_total = 1 + raw_len;
-    int try_spreadsheet_reorder = should_try_spreadsheet_reorder(chunk, chunk_len);
-
-    if (!try_spreadsheet_reorder) {
-        size_t rle_len;
-        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
-        if (rle_len < chunk_len) {
-            size_t rle_comp_len;
-            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
-
-            if (1 + rle_comp_len < chosen_total) {
-                free(chosen);
-                free(chosen_header);
-                chosen = rle_comp;
-                chosen_len = rle_comp_len;
-                chosen_header = NULL;
-                chosen_header_len = 0;
-                chosen_total = 1 + rle_comp_len;
-                chosen_flag = QSC_TRANSFORM_RLE;
-            } else {
-                free(rle_comp);
-            }
-        }
-        free(rle);
+    if (should_try_spreadsheet_reorder(chunk, chunk_len)) {
+        size_t shuf_len;
+        uint8_t *shuf = shuffle13_transform_encode(chunk, chunk_len, &shuf_len);
+        size_t shuf_comp_len;
+        uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
+        free(shuf);
+        uint8_t header[4];
+        write_len_header(header, chunk_len);
+        return wrap_chunk_payload(QSC_TRANSFORM_SHUFFLE13, header, 4,
+                                  shuf_comp, shuf_comp_len, out_len);
     }
 
     if (should_try_binary_reorder(chunk, chunk_len)) {
@@ -799,108 +888,45 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
         uint8_t *shuf = shuffle4_transform_encode(chunk, chunk_len, &shuf_len);
         size_t shuf_comp_len;
         uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
-        size_t shuf_total = 1 + 4 + shuf_comp_len;
-
-        if (shuf_total < chosen_total) {
-            uint8_t *header = (uint8_t *)malloc(4);
-            header[0] = (uint8_t)(chunk_len >> 24);
-            header[1] = (uint8_t)(chunk_len >> 16);
-            header[2] = (uint8_t)(chunk_len >> 8);
-            header[3] = (uint8_t)chunk_len;
-
-            free(chosen);
-            free(chosen_header);
-            chosen = shuf_comp;
-            chosen_len = shuf_comp_len;
-            chosen_header = header;
-            chosen_header_len = 4;
-            chosen_total = shuf_total;
-            chosen_flag = QSC_TRANSFORM_SHUFFLE4;
-        } else {
-            free(shuf_comp);
-        }
         free(shuf);
-
-        if (chosen_flag != QSC_TRANSFORM_SHUFFLE4) {
-            size_t bp_len;
-            uint8_t *bp = bitplane_transform_encode(chunk, chunk_len, &bp_len);
-            size_t bp_comp_len;
-            uint8_t *bp_comp = qsc_compress_payload(bp, bp_len, NULL, 0, &bp_comp_len);
-            size_t total = 1 + 4 + bp_comp_len;
-
-            if (total < chosen_total) {
-                uint8_t *header = (uint8_t *)malloc(4);
-                header[0] = (uint8_t)(chunk_len >> 24);
-                header[1] = (uint8_t)(chunk_len >> 16);
-                header[2] = (uint8_t)(chunk_len >> 8);
-                header[3] = (uint8_t)chunk_len;
-
-                free(chosen);
-                free(chosen_header);
-                chosen = bp_comp;
-                chosen_len = bp_comp_len;
-                chosen_header = header;
-                chosen_header_len = 4;
-                chosen_total = total;
-                chosen_flag = QSC_TRANSFORM_BITPLANE;
-            } else {
-                free(bp_comp);
-            }
-            free(bp);
-        }
+        uint8_t header[4];
+        write_len_header(header, chunk_len);
+        return wrap_chunk_payload(QSC_TRANSFORM_SHUFFLE4, header, 4,
+                                  shuf_comp, shuf_comp_len, out_len);
     }
 
-    if (try_spreadsheet_reorder) {
-        size_t shuf_len;
-        uint8_t *shuf = shuffle13_transform_encode(chunk, chunk_len, &shuf_len);
-        size_t shuf_comp_len;
-        uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
-        size_t total = 1 + 4 + shuf_comp_len;
-
-        if (total < chosen_total) {
-            uint8_t *header = (uint8_t *)malloc(4);
-            header[0] = (uint8_t)(chunk_len >> 24);
-            header[1] = (uint8_t)(chunk_len >> 16);
-            header[2] = (uint8_t)(chunk_len >> 8);
-            header[3] = (uint8_t)chunk_len;
-
-            free(chosen);
-            free(chosen_header);
-            chosen = shuf_comp;
-            chosen_len = shuf_comp_len;
-            chosen_header = header;
-            chosen_header_len = 4;
-            chosen_total = total;
-            chosen_flag = QSC_TRANSFORM_SHUFFLE13;
-        } else {
-            free(shuf_comp);
+    if (should_try_zero_run(chunk, chunk_len)) {
+        size_t rle_len;
+        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
+        if (rle_len + 64 < chunk_len && rle_len * 10 < chunk_len * 9) {
+            size_t rle_comp_len;
+            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
+            free(rle);
+            return wrap_chunk_payload(QSC_TRANSFORM_RLE, NULL, 0,
+                                      rle_comp, rle_comp_len, out_len);
         }
-        free(shuf);
+        free(rle);
     }
 
     if (looks_textual(chunk, chunk_len)) {
+        uint8_t *best_text = NULL;
+        size_t best_text_len = 0;
+        uint8_t *best_header = NULL;
+        size_t best_header_len = 0;
+        uint8_t best_flag = QSC_TRANSFORM_RAW;
+        size_t best_estimated_total = chunk_len;
+        size_t min_savings = 256 + chunk_len / 100;
+
         size_t tx_len;
         uint8_t *tx = text_transform_encode(chunk, chunk_len, &tx_len);
-
-        if (tx_len < chunk_len) {
-            size_t tx_comp_len;
-            uint8_t *tx_comp = qsc_compress_payload(tx, tx_len, NULL, 0, &tx_comp_len);
-
-            if (1 + tx_comp_len < chosen_total) {
-                free(chosen);
-                free(chosen_header);
-                chosen = tx_comp;
-                chosen_len = tx_comp_len;
-                chosen_header = NULL;
-                chosen_header_len = 0;
-                chosen_total = 1 + tx_comp_len;
-                chosen_flag = QSC_TRANSFORM_TEXT;
-            } else {
-                free(tx_comp);
-            }
+        if (tx_len + min_savings < chunk_len) {
+            best_text = tx;
+            best_text_len = tx_len;
+            best_flag = QSC_TRANSFORM_TEXT;
+            best_estimated_total = tx_len;
+        } else {
+            free(tx);
         }
-
-        free(tx);
 
         DynTextToken tokens[255] = {0};
         int token_count = collect_dynamic_tokens(chunk, chunk_len, tokens, 255);
@@ -908,53 +934,49 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
             size_t dyn_len;
             uint8_t *dyn = dynamic_transform_encode(chunk, chunk_len, tokens, token_count, &dyn_len);
 
-            if (dyn_len < chunk_len) {
-                size_t dyn_comp_len;
-                uint8_t *dyn_comp = qsc_compress_payload(dyn, dyn_len, NULL, 0, &dyn_comp_len);
+            size_t header_len = 1;
+            for (int i = 0; i < token_count; i++) header_len += 1 + tokens[i].len;
+            size_t estimated_total = dyn_len + header_len;
 
-                size_t header_len = 1;
-                for (int i = 0; i < token_count; i++) header_len += 1 + tokens[i].len;
-                size_t total = 1 + header_len + dyn_comp_len;
-
-                if (total < chosen_total) {
-                    uint8_t *header = (uint8_t *)malloc(header_len);
-                    size_t hp = 0;
-                    header[hp++] = (uint8_t)token_count;
-                    for (int i = 0; i < token_count; i++) {
-                        header[hp++] = tokens[i].len;
-                        memcpy(header + hp, tokens[i].text, tokens[i].len);
-                        hp += tokens[i].len;
-                    }
-
-                    free(chosen);
-                    free(chosen_header);
-                    chosen = dyn_comp;
-                    chosen_len = dyn_comp_len;
-                    chosen_header = header;
-                    chosen_header_len = header_len;
-                    chosen_total = total;
-                    chosen_flag = QSC_TRANSFORM_DYN_TEXT;
-                } else {
-                    free(dyn_comp);
+            if (estimated_total + min_savings < chunk_len &&
+                estimated_total < best_estimated_total) {
+                uint8_t *header = (uint8_t *)malloc(header_len);
+                size_t hp = 0;
+                header[hp++] = (uint8_t)token_count;
+                for (int i = 0; i < token_count; i++) {
+                    header[hp++] = tokens[i].len;
+                    memcpy(header + hp, tokens[i].text, tokens[i].len);
+                    hp += tokens[i].len;
                 }
-            }
 
-            free(dyn);
+                free(best_text);
+                free(best_header);
+                best_text = dyn;
+                best_text_len = dyn_len;
+                best_header = header;
+                best_header_len = header_len;
+                best_flag = QSC_TRANSFORM_DYN_TEXT;
+                best_estimated_total = estimated_total;
+            } else {
+                free(dyn);
+            }
         }
         free_dyn_tokens(tokens, token_count);
+
+        if (best_text) {
+            size_t text_comp_len;
+            uint8_t *text_comp = qsc_compress_payload(best_text, best_text_len, NULL, 0, &text_comp_len);
+            free(best_text);
+            uint8_t *result = wrap_chunk_payload(best_flag, best_header, best_header_len,
+                                                 text_comp, text_comp_len, out_len);
+            free(best_header);
+            return result;
+        }
     }
 
-    uint8_t *result = (uint8_t *)malloc(chosen_len + chosen_header_len + 1);
-    result[0] = chosen_flag;
-    if (chosen_header_len > 0) {
-        memcpy(result + 1, chosen_header, chosen_header_len);
-    }
-    memcpy(result + 1 + chosen_header_len, chosen, chosen_len);
-    *out_len = chosen_len + chosen_header_len + 1;
-
-    free(chosen);
-    free(chosen_header);
-    return result;
+    size_t raw_len;
+    uint8_t *raw = qsc_compress_payload_fast(chunk, chunk_len, prev_tail, prev_tail_len, &raw_len);
+    return wrap_chunk_payload(QSC_PAYLOAD_FAST | QSC_TRANSFORM_RAW, NULL, 0, raw, raw_len, out_len);
 }
 
 /* ======================================================================
@@ -1048,6 +1070,108 @@ static uint8_t *qsc_decompress_payload(const uint8_t *compressed, size_t comp_le
     return decompressed;
 }
 
+static uint8_t *qsc_decompress_payload_fast(const uint8_t *compressed, size_t comp_len,
+                                            const uint8_t *prev_tail, size_t prev_tail_len,
+                                            size_t *out_len)
+{
+    const uint8_t *p = compressed;
+    const uint8_t *end = compressed + comp_len;
+
+    uint32_t num_instructions = fast_read_varint(&p, end);
+    uint32_t num_literals     = fast_read_varint(&p, end);
+    uint32_t num_matches      = fast_read_varint(&p, end);
+    uint32_t num_new_offsets  = fast_read_varint(&p, end);
+    (void)num_new_offsets;
+
+    const uint8_t *instr_p = p;
+    size_t instr_bytes = ((size_t)num_instructions + 7) / 8;
+    p += instr_bytes;
+
+    const uint8_t *lit_p = p;
+    p += num_literals;
+
+    const uint8_t *len_p = p;
+    const uint8_t *len_scan = len_p;
+    size_t final_len = num_literals;
+    for (uint32_t i = 0; i < num_matches; i++) {
+        final_len += fast_read_varint(&len_scan, end);
+    }
+    const uint8_t *rep_p = len_scan;
+    const uint8_t *off_p = rep_p + (((size_t)num_matches + 3) / 4);
+
+    size_t buf_len = prev_tail_len + final_len;
+    uint8_t *buf = (uint8_t *)malloc(buf_len ? buf_len : 1);
+    if (prev_tail_len > 0) memcpy(buf, prev_tail, prev_tail_len);
+
+    size_t out_pos = prev_tail_len;
+    uint32_t lit_idx = 0;
+    uint32_t match_idx = 0;
+    int32_t rep0 = 0, rep1 = 0, rep2 = 0;
+    const uint8_t *len_read = len_p;
+    const uint8_t *off_read = off_p;
+
+    for (uint32_t i = 0; i < num_instructions; i++) {
+        uint8_t inst_byte = instr_p[i >> 3];
+        int is_match = (inst_byte >> (i & 7)) & 1;
+
+        if (!is_match) {
+            buf[out_pos++] = lit_p[lit_idx++];
+            continue;
+        }
+
+        int32_t length = (int32_t)fast_read_varint(&len_read, rep_p);
+        uint8_t rep_byte = rep_p[match_idx >> 2];
+        int32_t rt = (rep_byte >> ((match_idx & 3) * 2)) & 3;
+        match_idx++;
+
+        int32_t offset;
+        if (rt == 0) {
+            offset = rep0;
+        } else if (rt == 1) {
+            offset = rep1;
+            int32_t tmp = rep1;
+            rep1 = rep0; rep0 = tmp;
+        } else if (rt == 2) {
+            offset = rep2;
+            int32_t tmp = rep2;
+            rep2 = rep1; rep1 = rep0; rep0 = tmp;
+        } else {
+            offset = (int32_t)fast_read_varint(&off_read, end);
+            rep2 = rep1; rep1 = rep0; rep0 = offset;
+        }
+
+        size_t start = out_pos - (size_t)offset;
+        if ((size_t)offset >= (size_t)length) {
+            memcpy(buf + out_pos, buf + start, (size_t)length);
+        } else {
+            for (int32_t k = 0; k < length; k++) {
+                buf[out_pos + (size_t)k] = buf[start + (size_t)k];
+            }
+        }
+        out_pos += (size_t)length;
+    }
+
+    uint8_t *decompressed = (uint8_t *)malloc(final_len);
+    memcpy(decompressed, buf + prev_tail_len, final_len);
+    free(buf);
+
+    *out_len = final_len;
+    return decompressed;
+}
+
+static uint8_t *qsc_decompress_payload_auto(int fast_payload,
+                                            const uint8_t *compressed, size_t comp_len,
+                                            const uint8_t *prev_tail, size_t prev_tail_len,
+                                            size_t *out_len)
+{
+    if (fast_payload) {
+        return qsc_decompress_payload_fast(compressed, comp_len,
+                                           prev_tail, prev_tail_len, out_len);
+    }
+    return qsc_decompress_payload(compressed, comp_len,
+                                  prev_tail, prev_tail_len, out_len);
+}
+
 uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
                               const uint8_t *prev_tail, size_t prev_tail_len,
                               size_t *out_len)
@@ -1057,13 +1181,15 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         return NULL;
     }
 
-    uint8_t flag = compressed[0];
+    uint8_t stored_flag = compressed[0];
+    int fast_payload = (stored_flag & QSC_PAYLOAD_FAST) != 0;
+    uint8_t flag = stored_flag & QSC_TRANSFORM_MASK;
     const uint8_t *payload = compressed + 1;
     size_t payload_len = comp_len - 1;
 
     if (flag == QSC_TRANSFORM_TEXT) {
         size_t tx_len;
-        uint8_t *tx = qsc_decompress_payload(payload, payload_len, NULL, 0, &tx_len);
+        uint8_t *tx = qsc_decompress_payload_auto(fast_payload, payload, payload_len, NULL, 0, &tx_len);
         uint8_t *decoded = text_transform_decode(tx, tx_len, out_len);
         free(tx);
         return decoded;
@@ -1071,7 +1197,7 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
 
     if (flag == QSC_TRANSFORM_RLE) {
         size_t rle_len;
-        uint8_t *rle = qsc_decompress_payload(payload, payload_len, NULL, 0, &rle_len);
+        uint8_t *rle = qsc_decompress_payload_auto(fast_payload, payload, payload_len, NULL, 0, &rle_len);
         uint8_t *decoded = rle_transform_decode(rle, rle_len, out_len);
         free(rle);
         return decoded;
@@ -1088,7 +1214,7 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
                               ((size_t)payload[2] << 8)  |
                               (size_t)payload[3];
         size_t bp_len;
-        uint8_t *bp = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &bp_len);
+        uint8_t *bp = qsc_decompress_payload_auto(fast_payload, payload + 4, payload_len - 4, NULL, 0, &bp_len);
         uint8_t *decoded = bitplane_transform_decode(bp, bp_len, original_len, out_len);
         free(bp);
         return decoded;
@@ -1105,7 +1231,7 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
                               ((size_t)payload[2] << 8)  |
                               (size_t)payload[3];
         size_t shuf_len;
-        uint8_t *shuf = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &shuf_len);
+        uint8_t *shuf = qsc_decompress_payload_auto(fast_payload, payload + 4, payload_len - 4, NULL, 0, &shuf_len);
         uint8_t *decoded = shuffle4_transform_decode(shuf, shuf_len, original_len, out_len);
         free(shuf);
         return decoded;
@@ -1122,7 +1248,7 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
                               ((size_t)payload[2] << 8)  |
                               (size_t)payload[3];
         size_t shuf_len;
-        uint8_t *shuf = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &shuf_len);
+        uint8_t *shuf = qsc_decompress_payload_auto(fast_payload, payload + 4, payload_len - 4, NULL, 0, &shuf_len);
         uint8_t *decoded = shuffle13_transform_decode(shuf, shuf_len, original_len, out_len);
         free(shuf);
         return decoded;
@@ -1156,7 +1282,7 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         }
 
         size_t tx_len;
-        uint8_t *tx = qsc_decompress_payload(payload + p, payload_len - p, NULL, 0, &tx_len);
+        uint8_t *tx = qsc_decompress_payload_auto(fast_payload, payload + p, payload_len - p, NULL, 0, &tx_len);
         uint8_t *decoded = dynamic_transform_decode(tx, tx_len, dict, lens, token_count, out_len);
         free(tx);
         free(dict);
@@ -1164,7 +1290,8 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         return decoded;
     }
 
-    return qsc_decompress_payload(payload, payload_len, prev_tail, prev_tail_len, out_len);
+    return qsc_decompress_payload_auto(fast_payload, payload, payload_len,
+                                       prev_tail, prev_tail_len, out_len);
 }
 
 /* ======================================================================

@@ -8,7 +8,7 @@
 #define LZ_MIN_MATCH         4
 #define LZ_MAX_MATCH         65535
 #define LZ_WINDOW_SIZE       8388608  /* 8 MB */
-#define LZ_MAX_SEARCH_DEPTH  256
+#define LZ_MAX_SEARCH_DEPTH  16
 
 /* Result of LZ compression — with REP0/1/2 match support
  * rep_types: 0=rep0, 1=rep1, 2=rep2, 3=new_offset */

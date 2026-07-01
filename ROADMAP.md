@@ -23,7 +23,7 @@ Focus: code cleanup, test coverage, and documentation.
 - Add `LICENSE`.
 - Add reproducibility notes for benchmarks.
 - Keep generated archives, binaries, and large datasets out of the repository.
-- Add compatibility tests for older archives versus the new v8 transform-flagged chunk format.
+- Add compatibility tests for older archives versus the v9 transform-flagged and fast-payload chunk format.
 
 ## Phase 2: Standalone Bitstream
 

@@ -12,14 +12,14 @@ Generated with `python3 benchmarks/run.py`.
 
 ## Aggregate By Algorithm
 
-| Algorithm | Files | Original bytes | Compressed bytes | Ratio | Avg compress MB/s | Avg decompress MB/s |
+| Algorithm | Files | Original bytes | Compressed bytes | Ratio | Total-time compress MB/s | Total-time decompress MB/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| brotli-default | 29 | 6,062,277 | 1,347,334 | 0.222249 | 1.237 | 424.338 |
-| lzma | 29 | 6,062,277 | 1,377,992 | 0.227306 | 7.214 | 105.002 |
-| bzip2 | 29 | 6,062,277 | 1,409,211 | 0.232456 | 26.359 | 76.125 |
-| qsc3-v8 | 29 | 6,062,277 | 1,466,441 | 0.241896 | 3.587 | 17.535 |
-| zstd-10 | 29 | 6,062,277 | 1,573,971 | 0.259634 | 69.519 | 1191.649 |
-| zlib-9 | 29 | 6,062,277 | 1,787,481 | 0.294853 | 34.991 | 919.650 |
+| brotli-default | 29 | 6,062,277 | 1,347,334 | 0.222249 | 1.013 | 505.719 |
+| lzma | 29 | 6,062,277 | 1,377,992 | 0.227306 | 6.459 | 114.151 |
+| bzip2 | 29 | 6,062,277 | 1,409,211 | 0.232456 | 27.483 | 74.134 |
+| zstd-10 | 29 | 6,062,277 | 1,573,971 | 0.259634 | 70.042 | 1390.367 |
+| qsc3-v9 | 29 | 6,062,277 | 1,686,590 | 0.278211 | 9.601 | 22.632 |
+| zlib-9 | 29 | 6,062,277 | 1,787,481 | 0.294853 | 11.688 | 998.274 |
 
 ## Best Ratio By File
 
@@ -28,7 +28,7 @@ Generated with `python3 benchmarks/run.py`.
 | calgary/bib | bzip2 | 111,261 | 27,467 | 0.246870 |
 | calgary/book1 | bzip2 | 768,771 | 232,598 | 0.302558 |
 | calgary/book2 | bzip2 | 610,856 | 157,443 | 0.257742 |
-| calgary/geo | qsc3-v8 | 102,400 | 51,710 | 0.504980 |
+| calgary/geo | qsc3-v9 | 102,400 | 51,934 | 0.507168 |
 | calgary/news | brotli-default | 377,109 | 112,968 | 0.299563 |
 | calgary/obj1 | brotli-default | 21,504 | 9,341 | 0.434384 |
 | calgary/obj2 | lzma | 246,814 | 61,504 | 0.249192 |
@@ -48,55 +48,56 @@ Generated with `python3 benchmarks/run.py`.
 | canterbury/cp.html | brotli-default | 24,603 | 6,894 | 0.280210 |
 | canterbury/fields.c | brotli-default | 11,150 | 2,717 | 0.243677 |
 | canterbury/grammar.lsp | brotli-default | 3,721 | 1,124 | 0.302069 |
-| canterbury/kennedy.xls | qsc3-v8 | 1,029,744 | 39,539 | 0.038397 |
+| canterbury/kennedy.xls | qsc3-v9 | 1,029,744 | 42,234 | 0.041014 |
 | canterbury/lcet10.txt | bzip2 | 426,754 | 107,706 | 0.252384 |
 | canterbury/plrabn12.txt | bzip2 | 481,861 | 145,577 | 0.302114 |
 | canterbury/ptt5 | brotli-default | 513,216 | 40,939 | 0.079770 |
 | canterbury/sum | lzma | 38,240 | 9,452 | 0.247176 |
 | canterbury/xargs.1 | brotli-default | 4,227 | 1,464 | 0.346345 |
 
-## QSC3 v8 Results
+## QSC3 v9 Results
 
 | File | Original bytes | Compressed bytes | Ratio | Compress MB/s | Decompress MB/s | Verified |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| calgary/bib | 111,261 | 32,983 | 0.296447 | 0.195 | 14.082 | True |
-| calgary/book1 | 768,771 | 280,878 | 0.365360 | 4.479 | 19.877 | True |
-| calgary/book2 | 610,856 | 179,431 | 0.293737 | 2.064 | 22.288 | True |
-| calgary/geo | 102,400 | 51,710 | 0.504980 | 3.429 | 8.494 | True |
-| calgary/news | 377,109 | 125,491 | 0.332771 | 2.840 | 17.862 | True |
-| calgary/obj1 | 21,504 | 10,016 | 0.465774 | 3.106 | 5.211 | True |
-| calgary/obj2 | 246,814 | 74,879 | 0.303382 | 9.491 | 17.518 | True |
-| calgary/paper1 | 53,161 | 18,200 | 0.342356 | 2.762 | 10.410 | True |
-| calgary/paper2 | 82,199 | 28,822 | 0.350637 | 2.705 | 12.420 | True |
-| calgary/paper3 | 46,526 | 17,854 | 0.383742 | 2.586 | 9.335 | True |
-| calgary/paper4 | 13,286 | 5,572 | 0.419389 | 1.423 | 3.972 | True |
-| calgary/paper5 | 11,954 | 5,053 | 0.422704 | 1.312 | 2.994 | True |
-| calgary/paper6 | 38,105 | 13,167 | 0.345545 | 2.681 | 8.152 | True |
-| calgary/pic | 513,216 | 49,415 | 0.096285 | 12.743 | 46.882 | True |
-| calgary/progc | 39,611 | 13,193 | 0.333064 | 2.758 | 9.025 | True |
-| calgary/progl | 71,646 | 16,032 | 0.223767 | 3.343 | 15.377 | True |
-| calgary/progp | 49,379 | 11,028 | 0.223334 | 3.439 | 12.290 | True |
-| calgary/trans | 93,695 | 18,122 | 0.193415 | 6.872 | 18.283 | True |
-| canterbury/alice29.txt | 152,089 | 51,114 | 0.336080 | 2.453 | 15.163 | True |
-| canterbury/asyoulik.txt | 125,179 | 47,101 | 0.376269 | 2.569 | 13.394 | True |
-| canterbury/cp.html | 24,603 | 7,924 | 0.322075 | 1.927 | 6.596 | True |
-| canterbury/fields.c | 11,150 | 3,136 | 0.281256 | 1.457 | 3.972 | True |
-| canterbury/grammar.lsp | 3,721 | 1,309 | 0.351787 | 0.781 | 1.540 | True |
-| canterbury/kennedy.xls | 1,029,744 | 39,539 | 0.038397 | 4.583 | 117.698 | True |
-| canterbury/lcet10.txt | 426,754 | 125,805 | 0.294795 | 2.264 | 21.355 | True |
-| canterbury/plrabn12.txt | 481,861 | 175,351 | 0.363904 | 1.822 | 18.129 | True |
-| canterbury/ptt5 | 513,216 | 49,416 | 0.096287 | 12.803 | 45.962 | True |
-| canterbury/sum | 38,240 | 12,069 | 0.315612 | 4.335 | 8.634 | True |
-| canterbury/xargs.1 | 4,227 | 1,831 | 0.433168 | 0.800 | 1.613 | True |
+| calgary/bib | 111,261 | 34,480 | 0.309902 | 5.365 | 11.983 | True |
+| calgary/book1 | 768,771 | 435,765 | 0.566833 | 14.401 | 171.843 | True |
+| calgary/book2 | 610,856 | 182,936 | 0.299475 | 6.581 | 20.172 | True |
+| calgary/geo | 102,400 | 51,934 | 0.507168 | 6.414 | 7.267 | True |
+| calgary/news | 377,109 | 126,774 | 0.336173 | 6.600 | 16.062 | True |
+| calgary/obj1 | 21,504 | 12,756 | 0.593192 | 5.588 | 8.991 | True |
+| calgary/obj2 | 246,814 | 98,312 | 0.398324 | 22.387 | 72.590 | True |
+| calgary/paper1 | 53,161 | 19,279 | 0.362653 | 4.728 | 8.394 | True |
+| calgary/paper2 | 82,199 | 29,465 | 0.358459 | 5.071 | 10.397 | True |
+| calgary/paper3 | 46,526 | 19,195 | 0.412565 | 4.271 | 7.432 | True |
+| calgary/paper4 | 13,286 | 5,612 | 0.422400 | 1.663 | 3.324 | True |
+| calgary/paper5 | 11,954 | 5,079 | 0.424879 | 1.441 | 2.740 | True |
+| calgary/paper6 | 38,105 | 14,243 | 0.373783 | 4.126 | 7.327 | True |
+| calgary/pic | 513,216 | 49,452 | 0.096357 | 31.662 | 41.140 | True |
+| calgary/progc | 39,611 | 14,077 | 0.355381 | 4.402 | 7.292 | True |
+| calgary/progl | 71,646 | 16,765 | 0.233998 | 6.368 | 12.298 | True |
+| calgary/progp | 49,379 | 11,810 | 0.239170 | 5.504 | 9.625 | True |
+| calgary/trans | 93,695 | 25,114 | 0.268040 | 18.032 | 37.538 | True |
+| canterbury/alice29.txt | 152,089 | 51,756 | 0.340301 | 5.814 | 13.114 | True |
+| canterbury/asyoulik.txt | 125,179 | 47,404 | 0.378690 | 5.420 | 11.366 | True |
+| canterbury/cp.html | 24,603 | 10,353 | 0.420802 | 2.316 | 5.186 | True |
+| canterbury/fields.c | 11,150 | 5,538 | 0.496682 | 1.495 | 2.790 | True |
+| canterbury/grammar.lsp | 3,721 | 1,309 | 0.351787 | 0.697 | 1.111 | True |
+| canterbury/kennedy.xls | 1,029,744 | 42,234 | 0.041014 | 51.451 | 103.881 | True |
+| canterbury/lcet10.txt | 426,754 | 128,030 | 0.300009 | 6.787 | 19.256 | True |
+| canterbury/plrabn12.txt | 481,861 | 179,340 | 0.372182 | 6.020 | 16.441 | True |
+| canterbury/ptt5 | 513,216 | 49,453 | 0.096359 | 30.667 | 39.667 | True |
+| canterbury/sum | 38,240 | 16,291 | 0.426020 | 8.403 | 15.521 | True |
+| canterbury/xargs.1 | 4,227 | 1,834 | 0.433877 | 0.822 | 1.188 | True |
 
 ## Change Notes
 
-- QSC3 improved from the previous published aggregate of 1,491,485 bytes to 1,466,441 bytes on this corpus.
-- Average QSC3 compression speed improved to 3.587 MB/s in this run with the default `-O3` build.
-- QSC3 v8 wins `calgary/geo` and `canterbury/kennedy.xls` in this benchmark run, but Brotli still has the best aggregate ratio on Canterbury + Calgary.
+- QSC3 v9 switches to a practical-speed profile: capped match search, single-path transform selection, direct match-copy decompression, and a byte-aligned fast payload for raw fallback chunks.
+- On Canterbury + Calgary, QSC3 v9 compresses faster than Python `lzma` in total-time throughput: 9.601 MB/s vs 6.459 MB/s in this run.
+- QSC3 v9 does not beat LZMA ratio or decompression speed on this corpus. Aggregate QSC3 v9 ratio is 0.278211 vs LZMA 0.227306, and QSC3 v9 decompression is 22.632 MB/s vs LZMA 114.151 MB/s.
+- QSC3 v9 still beats zlib-9 ratio on this corpus: 0.278211 vs 0.294853.
 
 ## Caveats
 
-- QSC is measured through the command-line binary, including archive framing, file I/O, and process startup.
+- QSC is measured through the command-line binary, including archive framing, file I/O, process startup, and output-directory cleanup.
 - Python baselines run in process on byte buffers.
 - These results are useful for transparency and development tracking, but they are not a perfectly fair production-codec shootout.

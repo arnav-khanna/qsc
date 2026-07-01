@@ -391,19 +391,27 @@ void lz_decompress(const int32_t *instructions, size_t num_instr,
                    const uint8_t *prev_tail, size_t prev_tail_len,
                    uint8_t **out, size_t *out_len)
 {
-    ByteBuffer buf;
-    ByteBuffer_init(&buf);
-    ByteBuffer_reserve(&buf, prev_tail_len + num_instr * 4);
+    size_t final_len = 0;
+    size_t match_count = 0;
+    for (size_t j = 0; j < num_instr; j++) {
+        if (instructions[j] == 0) {
+            final_len++;
+        } else {
+            final_len += (size_t)lengths[match_count++];
+        }
+    }
 
-    for (size_t j = 0; j < prev_tail_len; j++)
-        ByteBuffer_push(&buf, prev_tail[j]);
+    size_t buf_len = prev_tail_len + final_len;
+    uint8_t *buf = (uint8_t *)malloc(buf_len ? buf_len : 1);
+    if (prev_tail_len > 0) memcpy(buf, prev_tail, prev_tail_len);
+    size_t out_pos = prev_tail_len;
 
     size_t lit_idx = 0, match_idx = 0, new_off_idx = 0;
     int32_t rep0 = 0, rep1 = 0, rep2 = 0;
 
     for (size_t j = 0; j < num_instr; j++) {
         if (instructions[j] == 0) {
-            ByteBuffer_push(&buf, (uint8_t)literals[lit_idx++]);
+            buf[out_pos++] = (uint8_t)literals[lit_idx++];
         } else {
             int32_t rt = rep_types[match_idx];
             int32_t length = lengths[match_idx];
@@ -426,17 +434,22 @@ void lz_decompress(const int32_t *instructions, size_t num_instr,
                 rep2 = rep1; rep1 = rep0; rep0 = offset;
             }
 
-            size_t start = buf.len - (size_t)offset;
-            for (int32_t k = 0; k < length; k++) {
-                ByteBuffer_push(&buf, buf.data[start + (size_t)k]);
+            size_t start = out_pos - (size_t)offset;
+            if ((size_t)offset >= (size_t)length) {
+                memcpy(buf + out_pos, buf + start, (size_t)length);
+            } else {
+                for (int32_t k = 0; k < length; k++) {
+                    buf[out_pos + (size_t)k] = buf[start + (size_t)k];
+                }
             }
+            out_pos += (size_t)length;
         }
     }
 
-    *out_len = buf.len - prev_tail_len;
+    *out_len = final_len;
     *out = (uint8_t *)malloc(*out_len);
-    memcpy(*out, buf.data + prev_tail_len, *out_len);
-    ByteBuffer_free(&buf);
+    memcpy(*out, buf + prev_tail_len, *out_len);
+    free(buf);
 }
 
 void lz_result_free(LZResult *r) {

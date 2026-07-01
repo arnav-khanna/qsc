@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 #define QSC_MAGIC      "QSC3"
-#define QSC_VERSION    8         /* v8: optional text, zero-run, bit-plane, shuffle4, and shuffle13 transforms */
+#define QSC_VERSION    9         /* v9: practical-speed transform selector with text, RLE, shuffle4, and shuffle13 */
 #define QSC_CHUNK_SIZE 8388608   /* 8 MB */
 #define QSC_CARRY_OVER 524288   /* 512 KB */
 #define QSC_NUM_THREADS 0       /* 0 = auto-detect */
