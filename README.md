@@ -28,6 +28,7 @@ The active transforms are:
 - a zero-run transform for sparse binary/image-like data;
 - a gated bit-plane transform for selected binary chunks;
 - a gated 4-byte lane shuffle for selected structured binary chunks;
+- a gated 13-byte lane shuffle for selected spreadsheet-like binary chunks;
 - a static text-token transform using a built-in dictionary;
 - a dynamic text-token transform using frequent per-chunk words and small delimiter fragments.
 
@@ -83,7 +84,7 @@ All archive-level integer fields are big-endian.
 ```text
 Archive:
   magic              4 bytes      ASCII "QSC3"
-  version            1 byte       currently 7
+  version            1 byte       currently 8
   file_count         uint32
 
   file table[file_count]:
@@ -111,6 +112,7 @@ The `compressed` chunk payload starts with a transform byte:
 3  zero-run transform payload, decoded without previous-chunk history
 4  bit-plane transform payload, decoded without previous-chunk history
 5  4-byte lane shuffle payload, decoded without previous-chunk history
+6  13-byte lane shuffle payload, decoded without previous-chunk history
 ```
 
 For dynamic text chunks, the transform byte is followed by a small dictionary header:

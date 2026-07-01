@@ -80,6 +80,7 @@ static uint64_t read_be64(FILE *f) {
 #define QSC_TRANSFORM_RLE  3
 #define QSC_TRANSFORM_BITPLANE 4
 #define QSC_TRANSFORM_SHUFFLE4 5
+#define QSC_TRANSFORM_SHUFFLE13 6
 #define QSC_TEXT_ESC      0
 
 static const char *QSC_TEXT_DICT[] = {
@@ -294,6 +295,23 @@ static int should_try_binary_reorder(const uint8_t *data, size_t len) {
            zero_pct >= 15 && zero_pct <= 40;
 }
 
+static int should_try_spreadsheet_reorder(const uint8_t *data, size_t len) {
+    if (len < 262144 || len > 2097152 || looks_textual(data, len)) return 0;
+
+    size_t printable = 0;
+    size_t zeros = 0;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') printable++;
+        if (c == 0) zeros++;
+    }
+
+    size_t printable_pct = printable * 100 / len;
+    size_t zero_pct = zeros * 100 / len;
+    return printable_pct >= 5 && printable_pct <= 25 &&
+           zero_pct >= 30 && zero_pct <= 60;
+}
+
 static uint8_t *bitplane_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
     size_t stride = (len + 7) / 8;
     size_t total = stride * 8;
@@ -368,6 +386,45 @@ static uint8_t *shuffle4_transform_decode(const uint8_t *data, size_t len,
         const uint8_t *src = data + lane * lane_len;
         for (size_t j = 0; j < lane_len; j++) {
             out[j * 4 + lane] = src[j];
+        }
+    }
+    memcpy(out + full, data + full, original_len - full);
+
+    *out_len = original_len;
+    return out;
+}
+
+static uint8_t *shuffle13_transform_encode(const uint8_t *data, size_t len, size_t *out_len) {
+    uint8_t *out = (uint8_t *)malloc(len);
+    size_t full = (len / 13) * 13;
+    size_t p = 0;
+
+    for (size_t lane = 0; lane < 13; lane++) {
+        for (size_t i = lane; i < full; i += 13) {
+            out[p++] = data[i];
+        }
+    }
+    memcpy(out + p, data + full, len - full);
+
+    *out_len = len;
+    return out;
+}
+
+static uint8_t *shuffle13_transform_decode(const uint8_t *data, size_t len,
+                                           size_t original_len, size_t *out_len) {
+    if (len < original_len) {
+        *out_len = 0;
+        return NULL;
+    }
+
+    uint8_t *out = (uint8_t *)malloc(original_len);
+    size_t full = (original_len / 13) * 13;
+    size_t lane_len = full / 13;
+
+    for (size_t lane = 0; lane < 13; lane++) {
+        const uint8_t *src = data + lane * lane_len;
+        for (size_t j = 0; j < lane_len; j++) {
+            out[j * 13 + lane] = src[j];
         }
     }
     memcpy(out + full, data + full, original_len - full);
@@ -712,27 +769,30 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
     uint8_t *chosen_header = NULL;
     size_t chosen_header_len = 0;
     size_t chosen_total = 1 + raw_len;
+    int try_spreadsheet_reorder = should_try_spreadsheet_reorder(chunk, chunk_len);
 
-    size_t rle_len;
-    uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
-    if (rle_len < chunk_len) {
-        size_t rle_comp_len;
-        uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
+    if (!try_spreadsheet_reorder) {
+        size_t rle_len;
+        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
+        if (rle_len < chunk_len) {
+            size_t rle_comp_len;
+            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
 
-        if (1 + rle_comp_len < chosen_total) {
-            free(chosen);
-            free(chosen_header);
-            chosen = rle_comp;
-            chosen_len = rle_comp_len;
-            chosen_header = NULL;
-            chosen_header_len = 0;
-            chosen_total = 1 + rle_comp_len;
-            chosen_flag = QSC_TRANSFORM_RLE;
-        } else {
-            free(rle_comp);
+            if (1 + rle_comp_len < chosen_total) {
+                free(chosen);
+                free(chosen_header);
+                chosen = rle_comp;
+                chosen_len = rle_comp_len;
+                chosen_header = NULL;
+                chosen_header_len = 0;
+                chosen_total = 1 + rle_comp_len;
+                chosen_flag = QSC_TRANSFORM_RLE;
+            } else {
+                free(rle_comp);
+            }
         }
+        free(rle);
     }
-    free(rle);
 
     if (should_try_binary_reorder(chunk, chunk_len)) {
         size_t shuf_len;
@@ -788,6 +848,34 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
             }
             free(bp);
         }
+    }
+
+    if (try_spreadsheet_reorder) {
+        size_t shuf_len;
+        uint8_t *shuf = shuffle13_transform_encode(chunk, chunk_len, &shuf_len);
+        size_t shuf_comp_len;
+        uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
+        size_t total = 1 + 4 + shuf_comp_len;
+
+        if (total < chosen_total) {
+            uint8_t *header = (uint8_t *)malloc(4);
+            header[0] = (uint8_t)(chunk_len >> 24);
+            header[1] = (uint8_t)(chunk_len >> 16);
+            header[2] = (uint8_t)(chunk_len >> 8);
+            header[3] = (uint8_t)chunk_len;
+
+            free(chosen);
+            free(chosen_header);
+            chosen = shuf_comp;
+            chosen_len = shuf_comp_len;
+            chosen_header = header;
+            chosen_header_len = 4;
+            chosen_total = total;
+            chosen_flag = QSC_TRANSFORM_SHUFFLE13;
+        } else {
+            free(shuf_comp);
+        }
+        free(shuf);
     }
 
     if (looks_textual(chunk, chunk_len)) {
@@ -1019,6 +1107,23 @@ uint8_t *qsc_decompress_chunk(const uint8_t *compressed, size_t comp_len,
         size_t shuf_len;
         uint8_t *shuf = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &shuf_len);
         uint8_t *decoded = shuffle4_transform_decode(shuf, shuf_len, original_len, out_len);
+        free(shuf);
+        return decoded;
+    }
+
+    if (flag == QSC_TRANSFORM_SHUFFLE13) {
+        if (payload_len < 4) {
+            *out_len = 0;
+            return NULL;
+        }
+
+        size_t original_len = ((size_t)payload[0] << 24) |
+                              ((size_t)payload[1] << 16) |
+                              ((size_t)payload[2] << 8)  |
+                              (size_t)payload[3];
+        size_t shuf_len;
+        uint8_t *shuf = qsc_decompress_payload(payload + 4, payload_len - 4, NULL, 0, &shuf_len);
+        uint8_t *decoded = shuffle13_transform_decode(shuf, shuf_len, original_len, out_len);
         free(shuf);
         return decoded;
     }
