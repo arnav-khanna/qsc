@@ -364,7 +364,7 @@ void lz_compress(const uint8_t *data, size_t data_len,
         }
 
         /* Step 6: Insert intermediate positions into hash tables */
-        int32_t insert_limit = best_len < 64 ? best_len : 64;
+        int32_t insert_limit = best_len < 1024 ? best_len : 1024;
         for (int32_t k = 0; k < insert_limit && wpos + k + LZ_MIN_MATCH <= n; k++) {
             ht_insert(&ht, compute_hash4(window, wpos + k), wpos + k);
             if (wpos + k + 8 <= n)

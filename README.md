@@ -1,6 +1,6 @@
 # QSC3 Compression Engine
 
-QSC3 is an experimental lossless compression project written in C. It packages one or more input files into a `.qsc` archive using optional reversible pre-transforms, a custom LZ-style tokenizer, a byte-aligned fast payload mode for raw fallback chunks, adaptive probability models, adaptive match-length coding, and an in-tree binary arithmetic coder for transform-heavy chunks.
+QSC3 is an experimental lossless compression project written in C. It packages one or more input files into a `.qsc` archive using optional reversible pre-transforms, a custom LZ-style tokenizer, adaptive probability models, adaptive match-length coding, and an in-tree binary arithmetic coder.
 
 The current codebase is best understood as a research prototype. It does not currently depend on Brotli, zlib, zstd, LZMA, bzip2, or another external compressor for its main compression pipeline. The Python benchmark script uses those libraries only as comparison baselines.
 
@@ -10,8 +10,8 @@ The project explores whether a compact custom codec can combine:
 
 - LZ77-style match finding with repeated-distance states.
 - Separate token streams for instructions, match lengths, literals, repeated-offset types, and new offsets.
-- A practical-speed path that avoids expensive entropy modeling when a raw LZ stream is the likely best tradeoff.
-- Adaptive bit-level probability models and slot-based match-length coding for transform-heavy chunks.
+- Ratio-first transform selection that keeps a transform only when its final coded size wins.
+- Adaptive bit-level probability models and slot-based match-length coding.
 - In-tree final coding stages instead of delegating compression to an existing backend.
 
 The long-term goal is to turn these experiments into a reproducible, standalone compression codec with a stable bitstream, rigorous benchmarks, and a clear research story.
@@ -20,7 +20,7 @@ The long-term goal is to turn these experiments into a reproducible, standalone 
 
 QSC3 splits files into 8 MiB chunks. Raw chunks may use up to 512 KiB of carry-over history from the previous chunk as match context. The carry-over bytes are available to the match finder, but are not emitted again in the decompressed output. Transformed chunks are encoded independently so each transform can remain self-contained.
 
-Within each chunk, the v9 compressor uses cheap content gates to select a single practical path instead of compressing several candidate representations. Spreadsheet-like, structured-binary, zero-heavy, and text-like chunks can use reversible transforms; raw fallback chunks use the faster byte-aligned payload stream.
+Within each chunk, the v10 compressor evaluates raw arithmetic coding plus gated reversible transforms and keeps the representation with the smallest final encoded chunk. Spreadsheet-like, structured-binary, zero-heavy, and text-like chunks can use reversible transforms; raw chunks retain previous-chunk history.
 
 The active transforms are:
 
@@ -44,7 +44,7 @@ For matches, QSC3 stores a match length and an offset type. Offset types are mod
 - `rep2`: repeat the third most recent offset.
 - `new_offset`: encode a new copy distance and promote it into the repeated-offset state.
 
-For arithmetic-coded transformed chunks, the compressor entropy-codes several logical streams with adaptive models:
+The compressor entropy-codes several logical streams with adaptive models:
 
 - instruction stream, using an order-3 binary context;
 - match lengths, using adaptive slot coding;
@@ -52,7 +52,7 @@ For arithmetic-coded transformed chunks, the compressor entropy-codes several lo
 - repeated-offset type stream, using a small adaptive cascade;
 - new offsets, using slot coding and previous-slot context.
 
-For fast raw chunks, QSC3 writes byte-aligned LZ streams: packed instructions, raw literals, varint lengths, packed repeated-offset types, and varint new offsets. For arithmetic chunks, the final compressed chunk is the output of the custom arithmetic encoder in `range_coder.c`.
+The final compressed chunk is the output of the custom arithmetic encoder in `range_coder.c`. A byte-aligned fast payload decoder remains in the format for experimental compatibility, but v10 does not emit fast payload chunks by default.
 
 ## Compression Pipeline
 
@@ -60,12 +60,12 @@ For fast raw chunks, QSC3 writes byte-aligned LZ streams: packed instructions, r
 Input file or directory
 -> archive file table
 -> 8 MiB file chunks
--> optional zero-run, bit-plane, shuffle, or text-token transform
+-> optional zero-run, shuffle, or text-token transform
 -> optional 512 KiB previous-chunk history for raw chunks
 -> LZ tokenization
 -> split token streams
--> fast byte-aligned payload for raw fallback chunks
-   OR adaptive stream models plus binary arithmetic coding for transformed chunks
+-> adaptive stream models
+-> binary arithmetic coding
 -> chunk frames
 -> QSC3 archive
 ```
@@ -73,7 +73,7 @@ Input file or directory
 Compression actually happens in two places:
 
 - Redundancy reduction happens in the optional reversible transforms and in the LZ tokenizer, which replaces repeated byte ranges with length/offset instructions.
-- Bit-level size reduction happens either in the byte-aligned fast LZ payload or in the adaptive arithmetic encoder, depending on the chunk flag.
+- Bit-level size reduction happens in the adaptive arithmetic encoder, which writes modeled token streams into the final chunk payload.
 
 No Brotli post-processing stage is present in the main codec.
 
@@ -84,7 +84,7 @@ All archive-level integer fields are big-endian.
 ```text
 Archive:
   magic              4 bytes      ASCII "QSC3"
-  version            1 byte       currently 9
+  version            1 byte       currently 10
   file_count         uint32
 
   file table[file_count]:
@@ -115,7 +115,7 @@ The `compressed` chunk payload starts with a transform byte:
 6  13-byte lane shuffle payload, decoded without previous-chunk history
 ```
 
-If the high bit of the transform byte is set (`0x80`), the low seven bits still identify the transform and the remaining payload uses the byte-aligned fast stream instead of the arithmetic-coded stream. QSC3 v9 emits this fast mode for raw fallback chunks by default.
+If the high bit of the transform byte is set (`0x80`), the low seven bits still identify the transform and the remaining payload uses the byte-aligned fast stream instead of the arithmetic-coded stream. QSC3 v10 can decode this experimental path but does not emit it by default.
 
 For dynamic text chunks, the transform byte is followed by a small dictionary header:
 
@@ -126,7 +126,7 @@ repeated token_count times:
   token_bytes        token_len bytes
 ```
 
-For bit-plane and shuffle chunks, the transform byte is followed by a four-byte big-endian original length. The remaining bytes are the coded transformed payload.
+For bit-plane decode-compatibility chunks and active shuffle chunks, the transform byte is followed by a four-byte big-endian original length. The remaining bytes are the coded transformed payload. QSC3 v10 can decode transform value `4`, but the current encoder does not emit bit-plane chunks by default.
 
 The arithmetic-coded stream has this logical order:
 
@@ -228,7 +228,7 @@ python3 benchmarks/run.py
 
 The Python benchmark script reads the standard corpora under `benchmarks/datasets/`, compresses and decompresses each file with Python bindings for zlib, bzip2, LZMA, Brotli, and Zstandard when available, then invokes the QSC3 command-line binary for comparison.
 
-Current checked-in results are under `benchmarks/results/`. On the current Canterbury + Calgary run, QSC3 v9 compresses faster than Python `lzma` in total-time throughput and is smaller than zlib-9 in aggregate. It does not beat LZMA ratio or decompression speed, and it is not yet a Brotli-beating general-purpose codec.
+Current checked-in results are under `benchmarks/results/`. On the current Canterbury + Calgary run, QSC3 v10 compresses faster than Brotli in this command-line benchmark and is smaller than zlib-9 and zstd-10 in aggregate. It still does not beat Brotli, LZMA, or bzip2 on aggregate ratio, so it is not yet a Brotli-beating general-purpose codec.
 
 Important caveats:
 
@@ -251,7 +251,7 @@ A publication-quality benchmark should pin codec versions, compression levels, h
 - Files are read fully into memory before chunk compression.
 - The benchmark harness is useful for exploration but is not yet scientifically fair.
 - Some declared model fields, such as order-3 literal model state, are not active in the implementation.
-- The speed profile improves compression time but trades away ratio on raw fallback chunks.
+- The ratio-first profile improves size but is slower than fast LZ codecs.
 - Decompression is not yet competitive with LZMA, zstd, or zlib on the current benchmark harness.
 - The transforms improve some corpus files but are not a substitute for production block modeling and static dictionaries such as Brotli's.
 

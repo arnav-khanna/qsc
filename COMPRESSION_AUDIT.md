@@ -8,19 +8,19 @@ Repository path: `/Users/rajivkhanna/Downloads/quick_sort 9`
 
 Is this algorithm currently relying on Brotli or any other existing compressor?
 
-No for the main QSC3 compression and decompression pipeline. The C codec path uses in-repository optional reversible transforms, an in-repository LZ tokenizer, an in-repository byte-aligned fast payload coder, in-repository adaptive models, and an in-repository arithmetic coder. Brotli appears only in `benchmarks/run.py` as an external comparison baseline. zlib appears only behind the optional `HAS_ZLIB` benchmark comparison path and the `make zlib` target.
+No for the main QSC3 compression and decompression pipeline. The C codec path uses in-repository optional reversible transforms, an in-repository LZ tokenizer, in-repository adaptive models, and an in-repository arithmetic coder. Brotli appears only in `benchmarks/run.py` as an external comparison baseline. zlib appears only behind the optional `HAS_ZLIB` benchmark comparison path and the `make zlib` target.
 
 Exact source references:
 
-- Main chunk compression uses gated transform selection, then calls either the custom arithmetic payload encoder for transform-heavy chunks or the custom byte-aligned fast payload encoder for raw fallback chunks: `qsc3.c:683-770`, `qsc3.c:792-845`, `qsc3.c:870-980`.
+- Main chunk compression uses ratio-first transform selection and calls the custom arithmetic payload encoder for emitted chunks: `qsc3.c:683-770`, `qsc3.c:870-1070`.
 - The LZ tokenizer is implemented in-tree: `lz_engine.c:208-380`.
 - The arithmetic entropy coder is implemented in-tree: `range_coder.c:33-124`.
-- The byte-aligned fast payload coder is implemented in-tree: `qsc3.c:772-845`, `qsc3.c:1073-1160`.
-- Chunk decompression dispatches to the in-tree arithmetic or fast payload decoder and uses the in-tree LZ reconstructor: `qsc3.c:982-1071`, `qsc3.c:1073-1173`.
-- Transform decode dispatch is implemented in-tree: `qsc3.c:1175-1308`.
+- A byte-aligned fast payload coder remains in-tree as an experimental compatibility path, but v10 does not emit it by default: `qsc3.c:772-845`, `qsc3.c:1153-1240`.
+- Chunk decompression dispatches to the in-tree arithmetic or fast payload decoder and uses the in-tree LZ reconstructor: `qsc3.c:1076-1160`, `qsc3.c:1163-1250`.
+- Transform decode dispatch is implemented in-tree: `qsc3.c:1252-1385`.
 - Brotli is imported and invoked only by the benchmark script: `benchmarks/run.py:15-23`, `benchmarks/run.py:42-57`, `benchmarks/run.py:140-167`.
 - Python zlib, bz2, lzma, Brotli, and Zstandard are benchmark baselines only: `benchmarks/run.py:1-57`.
-- Optional C zlib support is benchmark-only and guarded by `HAS_ZLIB` in `qsc3.c:1523-1541`.
+- Optional C zlib support is benchmark-only and guarded by `HAS_ZLIB` in `qsc3.c:1740-1758`.
 - The default build does not link zlib or Brotli: `Makefile`.
 - The optional `make zlib` target links `-lz` only for benchmark comparison output.
 - The existing built binary links only `/usr/lib/libSystem.B.dylib` according to `otool -L ./qsc3_c`.
@@ -49,24 +49,22 @@ Input path
 -> file discovery and archive file table
 -> full file read
 -> 8 MiB chunk split
--> gated zero-run, shuffle4, shuffle13, static-text, or dynamic-text transform, or raw fallback
+-> ratio-first raw, zero-run, shuffle4, shuffle13, static-text, or dynamic-text candidate selection
 -> optional 512 KiB previous-chunk history for raw chunks
 -> qsc_compress_chunk()
 -> lz_compress()
 -> token streams:
    instructions, literals, lengths, rep_types, new_offsets
--> byte-aligned fast payload for raw fallback chunks
-   OR arithmetic-coded stream metadata and adaptive stream models for transformed chunks
+-> arithmetic-coded stream metadata and adaptive stream models
 -> chunk frame: original_len, compressed_len, compressed bytes
 -> QSC3 archive output
 ```
 
 Compression is actually happening at:
 
-- `qsc3.c:141-434`: optional reversible transforms can rewrite text tokens, zero runs, selected bit-plane-friendly binary chunks, 4-byte lane-structured binary chunks, or 13-byte lane-structured spreadsheet-like chunks before LZ coding.
+- `qsc3.c:141-434`: optional reversible transforms can rewrite text tokens, zero runs, 4-byte lane-structured binary chunks, or 13-byte lane-structured spreadsheet-like chunks before LZ coding. The bit-plane decoder is retained for transform-flag compatibility, but v10 does not emit bit-plane chunks by default.
 - `lz_engine.c:208-380`: tokenization replaces repeated byte sequences with match instructions.
-- `qsc3.c:792-845`: raw fallback chunks are encoded into a custom byte-aligned fast LZ payload.
-- `qsc3.c:683-770`: transformed chunks can be encoded into an arithmetic-coded bitstream.
+- `qsc3.c:683-770`: selected chunk representations are encoded into an arithmetic-coded bitstream.
 - `range_coder.c:52-87`: arithmetic interval updates encode modeled bits.
 - `range_coder.c:103-115`: final pending arithmetic bits are flushed into bytes.
 
@@ -76,13 +74,13 @@ Archive packaging happens in `qsc3.c:1264-1413`. Packaging is not compression by
 
 | Component | Classification | Evidence | Notes |
 | --- | --- | --- | --- |
-| Tokenization | Custom | `qsc3.c:141-434`, `qsc3.c:870-980`, `lz_engine.c:208-380` | Optional zero-run, shuffle4, shuffle13, static-text, and dynamic-text transforms followed by a custom LZ77-style parser with dual hash tables, lazy scoring, and `rep0`/`rep1`/`rep2` states. Standard family, custom implementation. |
+| Tokenization | Custom | `qsc3.c:141-434`, `qsc3.c:870-1070`, `lz_engine.c:208-380` | Optional zero-run, shuffle4, shuffle13, static-text, and dynamic-text transforms followed by a custom LZ77-style parser with dual hash tables, lazy scoring, and `rep0`/`rep1`/`rep2` states. Standard family, custom implementation. |
 | Prediction | Custom, incomplete | `context_model.c:58-157`, `context_model.c:199-285` | Adaptive instruction, rep-type, offset, and literal models exist. Some declared order-3 literal fields in `context_model.h:74-90` are not active in `context_model.c`. |
 | Delta encoding | Missing | No active delta transform found | Integer varints and slot coding are used for metadata and lengths, but there is no general delta transform stage. |
 | Dictionary encoding | Custom | `lz_engine.c:118-187`, `lz_engine.c:208-380` | The sliding-window LZ matcher functions as dictionary matching. No external dictionary compressor is used. |
-| Columnar transforms | Custom, limited | `qsc3.c:687-743`, `qsc3.c:315-434` | Tokens are separated into logical streams before entropy coding. The bit-plane, shuffle4, and shuffle13 transforms are limited byte reorderings for selected binary chunks, not a general table/column transform framework. |
-| Entropy coding | Custom | `range_coder.c:33-210`, `qsc3.c:772-845` | In-tree binary arithmetic coder plus an in-tree byte-aligned fast payload mode. No Brotli/zlib/zstd entropy backend in the main codec. |
-| Final compression stage | Custom | `qsc3.c:760-769`, `qsc3.c:838-845`, `range_coder.c:103-119` | Final chunk bytes are produced by custom in-tree payload coders. |
+| Columnar transforms | Custom, limited | `qsc3.c:687-743`, `qsc3.c:315-434` | Tokens are separated into logical streams before entropy coding. The active shuffle4 and shuffle13 transforms are limited byte reorderings for selected binary chunks, not a general table/column transform framework. |
+| Entropy coding | Custom | `range_coder.c:33-210` | In-tree binary arithmetic coder. No Brotli/zlib/zstd entropy backend in the main codec. |
+| Final compression stage | Custom | `qsc3.c:760-769`, `range_coder.c:103-119` | Final emitted chunk bytes are produced by the custom arithmetic encoder. |
 
 ## External Compression Backend Search
 
@@ -92,14 +90,14 @@ Findings:
 - No zstd, lzma, bz2, gzip, or deflate backend exists in the C codec path.
 - `qsc3.c` includes zlib only when `HAS_ZLIB` is defined and uses it only inside `qsc_benchmark()`, not `qsc_pack()` or `qsc_compress_chunk()`.
 - The current codec includes built-in static and dynamic text dictionaries implemented directly in `qsc3.c`; these are not Brotli dictionaries or Brotli calls.
-- Zero-run, bit-plane, shuffle4, and shuffle13 transforms are implemented directly in `qsc3.c:228-434`; they do not call external compression libraries.
+- Zero-run, shuffle4, and shuffle13 transforms are implemented directly in `qsc3.c:228-434`; they do not call external compression libraries. A bit-plane decoder remains in-tree for compatibility.
 - `benchmarks/run.py` imports and calls Python compression libraries as baseline algorithms.
 - `benchmarks/results/results.csv` contains benchmark rows for external codecs, but it is generated output, not codec implementation.
 
 Source references:
 
 - `qsc3.c:21-23`: conditional `#include <zlib.h>`.
-- `qsc3.c:1523-1541`: optional zlib benchmark comparison.
+- `qsc3.c:1740-1758`: optional zlib benchmark comparison.
 - `benchmarks/run.py:1-57`, `benchmarks/run.py:140-167`: Python benchmark imports, baseline compressor/decompressor wrappers, and algorithm table.
 
 ## Benchmark Integrity
@@ -134,7 +132,7 @@ Potentially yes if `benchmarks/results/results.csv` is presented without caveats
 Genuinely novel or potentially novel parts:
 
 - The exact combination of match-length bucket context with the mixed literal model is a custom design choice.
-- The optional raw/zero-run/bit-plane/shuffle4/shuffle13/static/dynamic transform selection is custom to this implementation, though run-length coding, bit-plane ordering, byte shuffling, and dictionary/text-token transforms are standard compression ideas.
+- The optional raw/zero-run/shuffle4/shuffle13/static/dynamic transform selection is custom to this implementation, though run-length coding, byte shuffling, and dictionary/text-token transforms are standard compression ideas.
 - The particular scoring constants, stream order, and model mix are custom engineering decisions.
 
 Standard compression techniques:
@@ -147,7 +145,7 @@ Standard compression techniques:
 - Adaptive binary arithmetic/range coding.
 - Context modeling and fixed-weight context mixing.
 - Splitting token streams before entropy coding.
-- Run-length, bit-plane, and byte-shuffle transforms.
+- Run-length and byte-shuffle transforms.
 
 Closest existing research and systems:
 
@@ -233,7 +231,7 @@ Missing reproducibility requirements:
 Benchmark result:
 
 ```text
-QSC3 v9 aggregate: 6,062,277 original bytes -> 1,686,590 compressed bytes
-ratio: 0.278211
+QSC3 v10 aggregate: 6,062,277 original bytes -> 1,459,754 compressed bytes
+ratio: 0.240793
 verified rows: 29 / 29
 ```

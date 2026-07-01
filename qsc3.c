@@ -297,7 +297,7 @@ static int should_try_binary_reorder(const uint8_t *data, size_t len) {
            zero_pct >= 15 && zero_pct <= 40;
 }
 
-static int should_try_zero_run(const uint8_t *data, size_t len) {
+static QSC_UNUSED int should_try_zero_run(const uint8_t *data, size_t len) {
     if (len < 65536 || looks_textual(data, len)) return 0;
 
     size_t zeros = 0;
@@ -789,9 +789,9 @@ static uint32_t fast_read_varint(const uint8_t **p, const uint8_t *end) {
     return value;
 }
 
-static uint8_t *qsc_compress_payload_fast(const uint8_t *chunk, size_t chunk_len,
-                                          const uint8_t *prev_tail, size_t prev_tail_len,
-                                          size_t *out_len)
+static QSC_UNUSED uint8_t *qsc_compress_payload_fast(const uint8_t *chunk, size_t chunk_len,
+                                                     const uint8_t *prev_tail, size_t prev_tail_len,
+                                                     size_t *out_len)
 {
     LZResult lz;
     lz_compress(chunk, chunk_len, prev_tail, prev_tail_len, &lz);
@@ -871,16 +871,72 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
                             const uint8_t *prev_tail, size_t prev_tail_len,
                             size_t *out_len)
 {
-    if (should_try_spreadsheet_reorder(chunk, chunk_len)) {
+    int try_spreadsheet_reorder = should_try_spreadsheet_reorder(chunk, chunk_len);
+
+    if (try_spreadsheet_reorder) {
         size_t shuf_len;
         uint8_t *shuf = shuffle13_transform_encode(chunk, chunk_len, &shuf_len);
         size_t shuf_comp_len;
         uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
         free(shuf);
-        uint8_t header[4];
-        write_len_header(header, chunk_len);
-        return wrap_chunk_payload(QSC_TRANSFORM_SHUFFLE13, header, 4,
-                                  shuf_comp, shuf_comp_len, out_len);
+
+        if ((1 + 4 + shuf_comp_len) * 8 <= chunk_len) {
+            uint8_t header[4];
+            write_len_header(header, chunk_len);
+            uint8_t *result = wrap_chunk_payload(QSC_TRANSFORM_SHUFFLE13, header, 4,
+                                                 shuf_comp, shuf_comp_len, out_len);
+            return result;
+        }
+        free(shuf_comp);
+    } else {
+        size_t rle_len;
+        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
+        if (rle_len < chunk_len) {
+            size_t rle_comp_len;
+            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
+
+            if ((1 + rle_comp_len) * 8 <= chunk_len) {
+                uint8_t *result = wrap_chunk_payload(QSC_TRANSFORM_RLE, NULL, 0,
+                                                     rle_comp, rle_comp_len, out_len);
+                free(rle);
+                return result;
+            }
+            free(rle_comp);
+        }
+        free(rle);
+    }
+
+    size_t raw_len;
+    uint8_t *raw = qsc_compress_payload(chunk, chunk_len, prev_tail, prev_tail_len, &raw_len);
+
+    uint8_t chosen_flag = QSC_TRANSFORM_RAW;
+    uint8_t *chosen = raw;
+    size_t chosen_len = raw_len;
+    uint8_t *chosen_header = NULL;
+    size_t chosen_header_len = 0;
+    size_t chosen_total = 1 + raw_len;
+
+    if (!try_spreadsheet_reorder) {
+        size_t rle_len;
+        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
+        if (rle_len < chunk_len) {
+            size_t rle_comp_len;
+            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
+
+            if (1 + rle_comp_len < chosen_total) {
+                free(chosen);
+                free(chosen_header);
+                chosen = rle_comp;
+                chosen_len = rle_comp_len;
+                chosen_header = NULL;
+                chosen_header_len = 0;
+                chosen_total = 1 + rle_comp_len;
+                chosen_flag = QSC_TRANSFORM_RLE;
+            } else {
+                free(rle_comp);
+            }
+        }
+        free(rle);
     }
 
     if (should_try_binary_reorder(chunk, chunk_len)) {
@@ -888,45 +944,75 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
         uint8_t *shuf = shuffle4_transform_encode(chunk, chunk_len, &shuf_len);
         size_t shuf_comp_len;
         uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
+        size_t shuf_total = 1 + 4 + shuf_comp_len;
+
+        if (shuf_total < chosen_total) {
+            uint8_t *header = (uint8_t *)malloc(4);
+            write_len_header(header, chunk_len);
+
+            free(chosen);
+            free(chosen_header);
+            chosen = shuf_comp;
+            chosen_len = shuf_comp_len;
+            chosen_header = header;
+            chosen_header_len = 4;
+            chosen_total = shuf_total;
+            chosen_flag = QSC_TRANSFORM_SHUFFLE4;
+        } else {
+            free(shuf_comp);
+        }
         free(shuf);
-        uint8_t header[4];
-        write_len_header(header, chunk_len);
-        return wrap_chunk_payload(QSC_TRANSFORM_SHUFFLE4, header, 4,
-                                  shuf_comp, shuf_comp_len, out_len);
+
     }
 
-    if (should_try_zero_run(chunk, chunk_len)) {
-        size_t rle_len;
-        uint8_t *rle = rle_transform_encode(chunk, chunk_len, &rle_len);
-        if (rle_len + 64 < chunk_len && rle_len * 10 < chunk_len * 9) {
-            size_t rle_comp_len;
-            uint8_t *rle_comp = qsc_compress_payload(rle, rle_len, NULL, 0, &rle_comp_len);
-            free(rle);
-            return wrap_chunk_payload(QSC_TRANSFORM_RLE, NULL, 0,
-                                      rle_comp, rle_comp_len, out_len);
+    if (try_spreadsheet_reorder) {
+        size_t shuf_len;
+        uint8_t *shuf = shuffle13_transform_encode(chunk, chunk_len, &shuf_len);
+        size_t shuf_comp_len;
+        uint8_t *shuf_comp = qsc_compress_payload(shuf, shuf_len, NULL, 0, &shuf_comp_len);
+        size_t total = 1 + 4 + shuf_comp_len;
+
+        if (total < chosen_total) {
+            uint8_t *header = (uint8_t *)malloc(4);
+            write_len_header(header, chunk_len);
+
+            free(chosen);
+            free(chosen_header);
+            chosen = shuf_comp;
+            chosen_len = shuf_comp_len;
+            chosen_header = header;
+            chosen_header_len = 4;
+            chosen_total = total;
+            chosen_flag = QSC_TRANSFORM_SHUFFLE13;
+        } else {
+            free(shuf_comp);
         }
-        free(rle);
+        free(shuf);
     }
 
     if (looks_textual(chunk, chunk_len)) {
-        uint8_t *best_text = NULL;
-        size_t best_text_len = 0;
-        uint8_t *best_header = NULL;
-        size_t best_header_len = 0;
-        uint8_t best_flag = QSC_TRANSFORM_RAW;
-        size_t best_estimated_total = chunk_len;
-        size_t min_savings = 256 + chunk_len / 100;
-
         size_t tx_len;
         uint8_t *tx = text_transform_encode(chunk, chunk_len, &tx_len);
-        if (tx_len + min_savings < chunk_len) {
-            best_text = tx;
-            best_text_len = tx_len;
-            best_flag = QSC_TRANSFORM_TEXT;
-            best_estimated_total = tx_len;
-        } else {
-            free(tx);
+
+        if (tx_len < chunk_len) {
+            size_t tx_comp_len;
+            uint8_t *tx_comp = qsc_compress_payload(tx, tx_len, NULL, 0, &tx_comp_len);
+
+            if (1 + tx_comp_len < chosen_total) {
+                free(chosen);
+                free(chosen_header);
+                chosen = tx_comp;
+                chosen_len = tx_comp_len;
+                chosen_header = NULL;
+                chosen_header_len = 0;
+                chosen_total = 1 + tx_comp_len;
+                chosen_flag = QSC_TRANSFORM_TEXT;
+            } else {
+                free(tx_comp);
+            }
         }
+
+        free(tx);
 
         DynTextToken tokens[255] = {0};
         int token_count = collect_dynamic_tokens(chunk, chunk_len, tokens, 255);
@@ -936,47 +1022,51 @@ uint8_t *qsc_compress_chunk(const uint8_t *chunk, size_t chunk_len,
 
             size_t header_len = 1;
             for (int i = 0; i < token_count; i++) header_len += 1 + tokens[i].len;
-            size_t estimated_total = dyn_len + header_len;
 
-            if (estimated_total + min_savings < chunk_len &&
-                estimated_total < best_estimated_total) {
-                uint8_t *header = (uint8_t *)malloc(header_len);
-                size_t hp = 0;
-                header[hp++] = (uint8_t)token_count;
-                for (int i = 0; i < token_count; i++) {
-                    header[hp++] = tokens[i].len;
-                    memcpy(header + hp, tokens[i].text, tokens[i].len);
-                    hp += tokens[i].len;
+            if (dyn_len < chunk_len) {
+                size_t dyn_comp_len;
+                uint8_t *dyn_comp = qsc_compress_payload(dyn, dyn_len, NULL, 0, &dyn_comp_len);
+                size_t total = 1 + header_len + dyn_comp_len;
+
+                if (total < chosen_total) {
+                    uint8_t *header = (uint8_t *)malloc(header_len);
+                    size_t hp = 0;
+                    header[hp++] = (uint8_t)token_count;
+                    for (int i = 0; i < token_count; i++) {
+                        header[hp++] = tokens[i].len;
+                        memcpy(header + hp, tokens[i].text, tokens[i].len);
+                        hp += tokens[i].len;
+                    }
+
+                    free(chosen);
+                    free(chosen_header);
+                    chosen = dyn_comp;
+                    chosen_len = dyn_comp_len;
+                    chosen_header = header;
+                    chosen_header_len = header_len;
+                    chosen_total = total;
+                    chosen_flag = QSC_TRANSFORM_DYN_TEXT;
+                } else {
+                    free(dyn_comp);
                 }
-
-                free(best_text);
-                free(best_header);
-                best_text = dyn;
-                best_text_len = dyn_len;
-                best_header = header;
-                best_header_len = header_len;
-                best_flag = QSC_TRANSFORM_DYN_TEXT;
-                best_estimated_total = estimated_total;
-            } else {
-                free(dyn);
             }
+
+            free(dyn);
         }
         free_dyn_tokens(tokens, token_count);
-
-        if (best_text) {
-            size_t text_comp_len;
-            uint8_t *text_comp = qsc_compress_payload(best_text, best_text_len, NULL, 0, &text_comp_len);
-            free(best_text);
-            uint8_t *result = wrap_chunk_payload(best_flag, best_header, best_header_len,
-                                                 text_comp, text_comp_len, out_len);
-            free(best_header);
-            return result;
-        }
     }
 
-    size_t raw_len;
-    uint8_t *raw = qsc_compress_payload_fast(chunk, chunk_len, prev_tail, prev_tail_len, &raw_len);
-    return wrap_chunk_payload(QSC_PAYLOAD_FAST | QSC_TRANSFORM_RAW, NULL, 0, raw, raw_len, out_len);
+    uint8_t *result = (uint8_t *)malloc(chosen_len + chosen_header_len + 1);
+    result[0] = chosen_flag;
+    if (chosen_header_len > 0) {
+        memcpy(result + 1, chosen_header, chosen_header_len);
+    }
+    memcpy(result + 1 + chosen_header_len, chosen, chosen_len);
+    *out_len = chosen_len + chosen_header_len + 1;
+
+    free(chosen);
+    free(chosen_header);
+    return result;
 }
 
 /* ======================================================================
